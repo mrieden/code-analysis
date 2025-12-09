@@ -1,6 +1,4 @@
 import ast
-import os
-import inspect
 
 def exc_name_from_raise(node: ast.Raise) -> str:
     """Extract exception name from raise statement."""
@@ -8,10 +6,13 @@ def exc_name_from_raise(node: ast.Raise) -> str:
         return ""
     
     if isinstance(node.exc, ast.Name):
+        # Handle cases like raise Exception
         return node.exc.id
     elif isinstance(node.exc, ast.Call) and isinstance(node.exc.func, ast.Name):
+        # Handle cases like raise Exception()
         return node.exc.func.id
     elif isinstance(node.exc, ast.Attribute):
+        # Handle cases like module.Exception
         return node.exc.attr
     elif isinstance(node.exc, ast.Subscript):
         # Handle cases like Exception[Type]
@@ -20,42 +21,63 @@ def exc_name_from_raise(node: ast.Raise) -> str:
     return ""
 
 class AbstractClassHelper:
+
+    ABSTRACT_DECORATORS = {
+        "abstractmethod",
+        "abstractproperty",
+        "abstractclassmethod",
+        "abstractstaticmethod",
+    }
+
     @staticmethod
     def is_abstract_method(node: ast.FunctionDef) -> bool:
-        
+
         for d in node.decorator_list:
-            if isinstance(d, ast.Name) and d.id == "abstractmethod":
+            if isinstance(d, ast.Name) and d.id == AbstractClassHelper.ABSTRACT_DECORATORS:#check for @abstractmethod
                 return True
-            if isinstance(d, ast.Attribute) and d.attr == "abstractmethod":
+            if isinstance(d, ast.Attribute) and d.attr == AbstractClassHelper.ABSTRACT_DECORATORS:#check for @abc.abstractmethod
                 return True
 
-        if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
-            return True
+        if len(node.body) == 1 :
+            only_statement = node.body[0]
 
-        for n in ast.walk(node):
+            if isinstance(only_statement, ast.Pass):#check for 'pass' only body
+                return True
+            
+            if isinstance(only_statement, ast.Expr) and\
+                isinstance(only_statement.value, ast.Constant) and isinstance(only_statement.value.value, str):#check for docstring only body
+                return True
+            
+            if isinstance(only_statement, ast.Return) and\
+                isinstance(only_statement.value,ast.Name) and only_statement.value.id == "NotImplemented":#check for 'return NotImplemented' only body
+                    return True
+
+        for n in ast.walk(node):#check for raise NotImplementedError
             if isinstance(n, ast.Raise):
                 name = exc_name_from_raise(n)
                 if name == "NotImplementedError":
                     return True
 
-        doc = ast.get_docstring(node)
+        doc = ast.get_docstring(node)#check docstring for abstract hints
         if doc:
             low = doc.lower()
-            if any(word in low for word in ("abstract", "must implement", "override", "implement me")):
+            tirggers = ["not implemented", "abstract method","subclasses should implement",
+                        "to be implemented by subclass","abstract", "must implement", "override", "implement me"]
+            if any(word in low for word in tirggers):
                 return True
 
         return False
 
     @staticmethod
     def is_abstract_class(node: ast.ClassDef) -> bool:
-        # 1. Inherits from ABC or abc.ABC or metaclass=ABCMeta
+        # check if class inherits from ABC or ABCMeta
         for base in node.bases:
             if isinstance(base, ast.Name) and base.id in ("ABC", "ABCMeta"):
                 return True
             if isinstance(base, ast.Attribute) and base.attr in ("ABC", "ABCMeta"):
                 return True
 
-        # 2. Has at least one abstract method by heuristic
+        # check if any method is abstract
         for item in node.body:
             if isinstance(item, ast.FunctionDef):
                 if AbstractClassHelper.is_abstract_method(item):
@@ -128,16 +150,16 @@ class LSPDetector(ast.NodeVisitor):
                 f"with different parameter count ({child_args} vs {parent_args})."
             )
 
-        # Check return type annotations
-        c_ret = ast.unparse(child.returns) if child.returns else None
-        p_ret = ast.unparse(parent.returns) if parent.returns else None
+        # Check return type 
+        c_return = ast.unparse(child.returns) if child.returns else None
+        p_return = ast.unparse(parent.returns) if parent.returns else None
 
-        if c_ret != p_ret:
-            if p_ret is not None:
+        if c_return != p_return:
+            if p_return is not None:
                 self.add_violation(
                     child,
                     f"LSP: '{child.name}' changes return type "
-                    f"from '{p_ret}' to '{c_ret}'."
+                    f"from '{p_return}' to '{c_return}'."
                 )
 
         # Check if child raises NotImplementedError when parent is not abstract
@@ -177,9 +199,8 @@ class LSPDetector(ast.NodeVisitor):
                 )
 
 
-def analyze_file(path):
-    with open(path, "r", encoding="utf-8") as f:
-        tree = ast.parse(f.read())
+def analyze_code(code_str):
+    tree = ast.parse(code_str)
 
     detector = LSPDetector()
     detector.visit(tree)
@@ -188,28 +209,27 @@ def analyze_file(path):
 
 
 
-def analyze_project(folder):
-    results = {}
-    for root, _, files in os.walk(folder):
-        for f in files:
-            if f.endswith(".py"):
-                file_path = os.path.join(root, f)
-                issues = analyze_file(file_path)
-                if issues:
-                    results[file_path] = issues
-    return results
-
-
-
 if __name__ == "__main__":
-    project = input("Enter project folder path: ").strip()
-    result = analyze_project(project)
+    code = """
+class Parent:
+    def process(self, x):
+        return x + 1
 
-    if not result:
-        print("No LSP violations detected ✔")
-    else:
-        print("\n=== LSP Violations Detected ===")
-        for file, violations in result.items():
-            print(f"\nFile: {file}")
-            for v in violations:
-                print("  -", v)
+class Child1(Parent):
+    def process(self, x, y):   
+        return x
+
+class Child2(Parent):
+    def process(self, x):
+        return str(x)  
+
+class Child3(Parent):
+    def process(self, x):
+        raise ValueError()
+
+class Child4(Parent):
+    def process(self, x):
+        raise NotImplementedError()
+"""
+    violations = analyze_code(code)
+    print(violations)

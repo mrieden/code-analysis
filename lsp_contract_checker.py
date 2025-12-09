@@ -1,18 +1,3 @@
-"""
-lsp_contract_checker.py
-
-Static analyzer to detect Liskov Substitution Principle (LSP) violations and
-contract issues in Python code:
- - Abstract class/method detection
- - Signature mismatches
- - Return-type changes / postcondition weakening
- - New exceptions introduced
- - Precondition strengthening (type checks, comparisons, early returns)
- - Numeric constraint extraction and logical contradictions / input-range narrowing
-
-Usage:
-    python lsp_contract_checker.py /path/to/python/project
-"""
 
 import ast
 import os

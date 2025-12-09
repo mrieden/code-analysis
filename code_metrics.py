@@ -6,8 +6,88 @@ from radon.complexity import cc_visit
 from radon.metrics import mi_visit, h_visit
 from radon.raw import analyze
 
+
+import ast
+import re
+
+def naming_quality_metrics(code: str):
+    naming_issues = []
+    score = 100  # Start with perfect score
+
+    try:
+        tree = ast.parse(code)
+    except Exception as e:
+        return {
+            "error": f"Failed to parse code: {e}",
+            "naming_score": 0,
+            "issues": []
+        }
+
+    snake_case = re.compile(r'^[a-z_][a-z0-9_]*$')
+    constant_case = re.compile(r'^[A-Z_][A-Z0-9_]*$')
+    class_case = re.compile(r'^[A-Z][a-zA-Z0-9]+$')
+
+    # ------------------------------------------------------------
+    # Helper to record issues
+    # ------------------------------------------------------------
+    def add_issue(name, lineno, kind, rule):
+        nonlocal score
+        naming_issues.append({
+            "name": name,
+            "line": lineno,
+            "type": kind,
+            "violation": rule
+        })
+        score -= 5  # each violation costs 5 points
+
+    # ------------------------------------------------------------
+    # Walk through AST and check names
+    # ------------------------------------------------------------
+    for node in ast.walk(tree):
+
+        # -------------------- FUNCTIONS -------------------------
+        if isinstance(node, ast.FunctionDef):
+            if not snake_case.match(node.name):
+                add_issue(node.name, node.lineno, "function", "Function names should be snake_case")
+
+        # -------------------- CLASSES ---------------------------
+        elif isinstance(node, ast.ClassDef):
+            if not class_case.match(node.name):
+                add_issue(node.name, node.lineno, "class", "Class names should be CamelCase")
+
+        # -------------------- VARIABLES -------------------------
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+
+                    # CONSTANTS: UPPERCASE
+                    if constant_case.match(target.id):
+                        continue
+
+                    # snake_case variables
+                    if not snake_case.match(target.id):
+                        add_issue(target.id, node.lineno, "variable", "Variable names should be snake_case")
+
+        # -------------------- ARGUMENTS -------------------------
+        elif isinstance(node, ast.arg):
+            if node.arg != "self" and not snake_case.match(node.arg):
+                add_issue(node.arg, node.lineno, "argument", "Argument names should be snake_case")
+
+    # Final score clamp
+    score = max(0, min(100, score))
+
+    return {
+        "naming_score": score,
+        "issues": naming_issues
+    }
+
+
+
 def analyze_code_string(code_string):
     results = {}
+
+    results["naming_quality"] = naming_quality_metrics(code)
+
 
     # === RADON METRICS ===
     try:
