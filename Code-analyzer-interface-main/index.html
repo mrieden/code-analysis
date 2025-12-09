@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Code Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        /* You can keep these as fallbacks */
+        --color-background: #F9FAFB; 
+        --color-ui-panels: #FFFFFF;
+        --color-accent-primary: #00A38E;
+        --color-accent-secondary: #864ADF;
+        --color-text-primary: #1F2937;
+        --color-text-secondary: #6B7280;
+        --color-status-success: #16A34A;
+        --color-status-warning: #F97316;
+        --color-status-error: #DC2626;
+        --color-border: #E5E7EB;
+      }
+      .dark {
+        /* You can keep these as fallbacks */
+        --color-background: #1B1825;
+        --color-ui-panels: #1A1625;
+        --color-accent-primary: #00F5D4;
+        --color-accent-secondary: #9B5DE5;
+        --color-text-primary: #F5F5F5;
+        --color-text-secondary: #5B5673;
+        --color-status-success: #00FF7F;
+        --color-status-warning: #FFA500;
+        --color-status-error: #FF4757;
+        --color-border: #5B5673;
+      }
+
+      /* 1. Base Styles for Light Mode Image */
+      body {
+        background-color: var(--color-background); /* Fallback color */
+        /* REPLACE THIS PATH IF YOUR IMAGE NAME IS DIFFERENT */
+        background-image: url('/images/light-mode.jpg'); 
+        background-size: cover;
+        background-repeat: no-repeat;
+        background-attachment: fixed; /* Keeps image still while scrolling */
+        transition: background-image 0.5s ease-in-out; /* Smooth fade effect */
+      }
+
+      /* 2. Styles for Dark Mode Image */
+      .dark body {
+        /* REPLACE THIS PATH IF YOUR IMAGE NAME IS DIFFERENT */
+        background-image: url('/images/dark-mode.jpg'); 
+      }
+    </style>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              'background': 'var(--color-background)',
+              'ui-panels': 'var(--color-ui-panels)',
+              'accent-primary': 'var(--color-accent-primary)',
+              'accent-secondary': 'var(--color-accent-secondary)',
+              'text-primary': 'var(--color-text-primary)',
+              'text-secondary': 'var(--color-text-secondary)',
+              'status-success': 'var(--color-status-success)',
+              'status-warning': 'var(--color-status-warning)',
+              'status-error': 'var(--color-status-error)',
+              'border-color': 'var(--color-border)',
+            },
+            fontFamily: {
+              sans: ['system-ui', 'sans-serif'],
+              mono: ['Fira Code', 'Courier New', 'monospace'],
+            }
+          },
+        },
+      };
+    </script>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/"
+  }
+}
+</script>
+</head>
+  <body class="font-sans antialiased">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
