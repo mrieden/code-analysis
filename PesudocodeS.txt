@@ -1,0 +1,64 @@
+FUNCTION CheckSRP(code)
+
+    // 1️⃣ تحويل الكود لشجرة AST
+    PARSE the code into an AST tree
+
+    // 2️⃣ إنشاء تقرير فارغ لكل الكلاسات
+    CREATE empty report_dictionary
+
+    // 3️⃣ لف على كل كلاس موجود في الكود
+    FOR EACH class_node IN AST tree:
+
+        class_name = class_node.name
+        CREATE empty list method_info_list           // لتخزين معلومات كل الميثودز
+        CREATE empty set all_responsibilities       // لتخزين كل المسؤوليات في الكلاس
+        total_objects_used = 0                       // عداد لكل الـ objects المستخدمة
+
+        // 4️⃣ لف على كل ميثود داخل الكلاس
+        FOR EACH method_node IN class_node.body:
+
+            method_name = method_node.name
+            CREATE empty set objects_used            // لتجميع كل الكائنات المستخدمة في الميثود
+
+            // 5️⃣ امشي على كل statements داخل الميثود بشكل recursive
+            FOR EACH statement IN method_node (walk recursively):
+
+                IF statement IS a function call:
+
+                    IF call IS object.method():
+                        ADD object name TO objects_used
+                    ELSE IF call IS direct function call:
+                        ADD function name TO objects_used
+
+            // 6️⃣ استنتاج المسؤوليات من اسم الميثود
+            SPLIT method_name INTO responsibilities BY '_' OR 'And' OR 'Or'
+            NORMALIZE responsibilities (e.g., lowercase)
+            ADD responsibilities TO all_responsibilities
+
+            // 7️⃣ إنشاء وصف للميثود
+            description = "Method 'method_name' has responsibilities: list of responsibilities"
+
+            // 8️⃣ تخزين معلومات الميثود
+            ADD {
+                "name": method_name,
+                "objects_used": objects_used,
+                "responsibilities": responsibilities,
+                "description": description
+            } TO method_info_list
+
+            total_objects_used += COUNT(objects_used)
+
+        // 9️⃣ حساب عوامل الـ SRP للكلاس
+        responsibility_factor = (COUNT(all_responsibilities) - 1) / COUNT(all_responsibilities) IF all_responsibilities NOT EMPTY ELSE 0
+        object_factor = (total_objects_used - COUNT(method_info_list)) / total_objects_used IF total_objects_used > 0 ELSE 0
+        srp_violation_score = MIN(1, responsibility_factor + object_factor)
+
+        // 10️⃣ حفظ التقرير النهائي للكلاس
+        report_dictionary[class_name] = {
+            "num_methods": COUNT(method_info_list),
+            "methods": method_info_list,
+            "responsibilities": all_responsibilities,
+            "srp_violation_score": srp_violation_score * 100
+        }
+
+    RETURN report_dictionary

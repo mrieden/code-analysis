@@ -1,0 +1,43 @@
+function detect_DIP_violations(project_files):
+    asts = parse_all_files_to_AST(project_files)
+    types = extract_types_from_asts(asts)
+    deps = build_type_dependency_graph(types, asts)
+    layers = infer_layers(types)
+
+    results = []
+
+    for each type T in types:
+        issues = []
+
+        for each method M in T.methods_and_constructors:
+            for each param P in M.parameters:
+                if is_concrete(P.type) and not is_interface(P.type):
+                    if not covered_by_DI_pattern(M, P):
+                        issues.append({ "rule":"ParamConcrete", "loc":loc(T,M,P) })
+
+        for each field F in T.fields:
+            if contains_new(F.initializer):
+                newType = type_of_new(F.initializer)
+                if is_concrete(newType) and not allowed_factory(newType):
+                    issues.append({ "rule":"FieldConcreteInit", "loc":loc(T,F) })
+
+        for each R in deps.references_from(T):
+            if is_higher(layers[T]) and is_lower(layers[R]):
+                if is_concrete(R) and not has_abstraction_between(T, R, deps):
+                    issues.append({ "rule":"DependsUpDown", "loc":loc(T,R) })
+
+        if uses_many_unabstracted_types(T) and not has_common_interface(T):
+            issues.append({ "rule":"MissingAbstraction", "loc":loc(T) })
+
+        for issue in issues:
+            if di_pattern_in_type(T) or near_factory(issue):
+                issue.severity = "low"
+            else:
+                issue.severity = "high"
+
+        conf = compute_confidence(issues)
+
+        if issues not empty:
+            results.append({ "type":T.name, "layer":layers[T], "violations":issues, "confidence":conf })
+
+    return results

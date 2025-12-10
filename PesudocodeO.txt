@@ -1,0 +1,96 @@
+# =====================================
+# كلاس OCPDetector
+# مسؤول عن المرور على كود بايثون وتحليل انتهاكات مبدأ Open/Closed Principle (OCP)
+# =====================================
+CLASS OCPDetector:
+
+    # تهيئة الكلاس
+    INIT:
+        # قائمة لتخزين كل الانتهاكات المكتشفة
+        violations = empty list      
+        # اسم الكلاس الحالي أثناء التحليل
+        current_class = None         
+
+    # تحقق من if يقارن بـ type/kind/action/method
+    FUNCTION is_type_comparison(node):
+        IF node هو IF statement AND node.test هو Compare:
+            left = node.test.left
+            IF left هو Name AND left.id.lower() في ["type","kind","action","method"]:
+                RETURN True
+        RETURN False
+
+    # تحقق من if يستخدم isinstance على non-built-in types
+    FUNCTION is_isinstance_dispatch(node):
+        IF node هو IF statement AND node.test هو Call:
+            func = node.test.func
+            IF func هو Name AND func.id == "isinstance":
+                type_arg = node.test.args[1] IF موجود ELSE None
+                IF type_arg هو Name AND type_arg.id في BUILTIN_TYPES:
+                    RETURN False
+                RETURN True
+        RETURN False
+
+    # تسجيل الانتهاك
+    FUNCTION report_violation(node, v_type, severity, detail=""):
+        ADD dictionary TO violations:
+            class = current_class
+            line = node.lineno
+            type = v_type
+            severity = severity
+            detail = detail
+
+    # زيارة كل كلاس
+    FUNCTION visit_ClassDef(node):
+        current_class = node.name
+        VISIT جميع العقد الفرعية للـ node
+        current_class = None
+
+    # زيارة كل if statements داخل الكلاس
+    FUNCTION visit_If(node):
+        IF is_type_comparison(node):
+            IF أي comparator هو Constant:
+                severity = "medium"
+            ELSE:
+                severity = "high"
+            report_violation(
+                node,
+                "IF Type Dispatch",
+                severity,
+                "Uses if/elif on type/kind/action/method"
+            )
+        ELSE IF is_isinstance_dispatch(node):
+            report_violation(
+                node,
+                "isinstance Dispatch",
+                "high",
+                "Uses isinstance() on non-built-in type"
+            )
+        VISIT جميع العقد الفرعية للـ node
+
+    # زيارة كل match-case statements داخل الكلاس
+    FUNCTION visit_Match(node):
+        all_constants = True IF كل cases هي MatchValue + Constant ELSE False
+        IF all_constants:
+            severity = "medium"
+        ELSE:
+            severity = "high"
+        report_violation(
+            node,
+            "MATCH-CASE Dispatch",
+            severity,
+            "Uses match-case (switch-style)"
+        )
+        VISIT جميع العقد الفرعية للـ node
+
+# دالة مساعدة لقراءة كود من ملف وتحليل الانتهاكات
+FUNCTION detect_ocp_violations_from_file(filename):
+    READ محتوى الملف filename AS code
+    PARSE code إلى AST tree
+    CREATE detector = OCPDetector()
+    detector.visit(tree)
+    RETURN detector.violations
+
+# استخدام الدالة على ملف بايثون
+violations = detect_ocp_violations_from_file("Code_Detected.py")
+FOR كل انتهاك v في violations:
+    PRINT v
