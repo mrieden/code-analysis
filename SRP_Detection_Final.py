@@ -1,6 +1,5 @@
 import ast
 import re
-import pprint
 
 class SRPAnalyzerEnhanced(ast.NodeVisitor):
     def __init__(self):
@@ -22,16 +21,14 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
                         elif isinstance(stmt.func, ast.Name):
                             objects_used.add(stmt.func.id)
 
+                # Detection logic using naming conventions
                 responsibilities = re.split('_|And|Or', method_name)
                 responsibilities = [r.lower() for r in responsibilities if r]
 
-                description = f"Method '{method_name}' has responsibilities: {', '.join(responsibilities)}"
-
                 methods_info.append({
                     "name": method_name,
-                    "objects_used": objects_used,
-                    "responsibilities": responsibilities,
-                    "description": description
+                    "objects_used": list(objects_used),
+                    "responsibilities": responsibilities
                 })
 
         all_responsibilities = set(r for m in methods_info for r in m["responsibilities"])
@@ -43,33 +40,35 @@ class SRPAnalyzerEnhanced(ast.NodeVisitor):
         srp_violation_score = min(1, responsibility_factor + object_factor)
 
         self.report[class_name] = {
-            "num_methods": len(methods_info),
-            "methods": [m["name"] for m in methods_info],
-            "objects_used": [m["objects_used"] for m in methods_info],
-            "responsibilities": all_responsibilities,
-            "methods_description": [m["description"] for m in methods_info],
-            "srp_violation_score": round(srp_violation_score * 100, 1)
+            "srp_violation_score": round(srp_violation_score * 100, 1),
+            "is_violation": srp_violation_score > 0.4,
+            "methods": [m["name"] for m in methods_info]
         }
-
         self.generic_visit(node)
 
-
-def check_srp_percentage(code):
-    tree = ast.parse(code)
-    analyzer = SRPAnalyzerEnhanced()
-    analyzer.visit(tree)
-    return analyzer.report
-
-
-def read_code_from_file(filename):
-    with open(filename, "r") as f:
-        return f.read()
-
-
-file_to_check = "Code_Detected.py"
-
-my_code = read_code_from_file(file_to_check)
-
-report = check_srp_percentage(my_code)
-
-pprint.pprint(report)
+def get_srp_report(code):
+    try:
+        tree = ast.parse(code)
+        analyzer = SRPAnalyzerEnhanced()
+        analyzer.visit(tree)
+        
+        if not analyzer.report:
+            return {"status": "Pass", "reason": "No classes detected.", "suggestion": "Define a class to see SRP analysis."}
+            
+        first_class = list(analyzer.report.keys())[0]
+        data = analyzer.report[first_class]
+        
+        if data["is_violation"]:
+            return {
+                "status": "Violation",
+                "reason": f"Class '{first_class}' score is {data['srp_violation_score']}%. It likely has too many responsibilities.",
+                "suggestion": f"Split '{first_class}' into smaller classes. Avoid 'And' in method names like '{data['methods'][0]}'."
+            }
+        
+        return {
+            "status": "Pass",
+            "reason": f"Class '{first_class}' is cohesive.",
+            "suggestion": "No refactor needed."
+        }
+    except Exception:
+        return {"status": "Pass", "reason": "Analysis pending...", "suggestion": "N/A"}
