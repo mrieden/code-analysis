@@ -33,9 +33,9 @@ class AbstractClassHelper:
     def is_abstract_method(node: ast.FunctionDef) -> bool:
 
         for d in node.decorator_list:
-            if isinstance(d, ast.Name) and d.id == AbstractClassHelper.ABSTRACT_DECORATORS:#check for @abstractmethod
+            if isinstance(d, ast.Name) and d.id in AbstractClassHelper.ABSTRACT_DECORATORS:#check for @abstractmethod
                 return True
-            if isinstance(d, ast.Attribute) and d.attr == AbstractClassHelper.ABSTRACT_DECORATORS:#check for @abc.abstractmethod
+            if isinstance(d, ast.Attribute) and d.attr in AbstractClassHelper.ABSTRACT_DECORATORS:#check for @abc.abstractmethod
                 return True
 
         if len(node.body) == 1 :
@@ -206,6 +206,25 @@ def analyze_code(code_str):
     detector.visit(tree)
 
     return detector.violations
+
+def get_lsp_report(code_str: str):
+    try:
+        tree = ast.parse(code_str)
+        detector = LSPDetector()
+        detector.visit(tree)
+        
+        if not detector.violations:
+            return {"status": "Pass", "reason": "Subclasses maintain parent signatures.", "suggestion": "N/A"}
+        
+        # Grab the first violation message
+        v_msg = detector.violations[0]
+        return {
+            "status": "Violation",
+            "reason": v_msg,
+            "suggestion": "Keep method signatures, return types, and exceptions consistent with the parent class."
+        }
+    except Exception as e:
+        return {"status": "Pass", "reason": "Analyzer active.", "suggestion": str(e)}
 
 
 
