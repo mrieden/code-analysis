@@ -101,3 +101,6 @@ async def websocket_endpoint(websocket: WebSocket):
             print("Response sent to Frontend!")
     except WebSocketDisconnect:
         print("WebSocket Disconnected")
+
+
+# uvicorn main:app --reload
