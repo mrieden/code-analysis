@@ -6,12 +6,12 @@ import docker
 import tempfile
 import shutil
 from langchain_core.tools import tool
-from ISP_detect import get_isp_report
-from Liskov_Substitution_Principle import get_lsp_report
-from OCP_Detection_Final import get_ocp_report
-from dependancy_principle import get_dip_report
-from SRP_Detection_Final import get_srp_report
-from clean_code import analyze_code_string
+from SOLID.ISP_detect import get_isp_report
+from SOLID.Liskov_Substitution_Principle import get_lsp_report
+from SOLID.OCP_Detection_Final import get_ocp_report
+from SOLID.dependancy_principle import get_dip_report
+from SOLID.SRP_Detection_Final import get_srp_report
+from Clean_code.clean_code import analyze_code_string
 
 
 BLOCKED_PATTERNS = [
@@ -130,7 +130,7 @@ def complexity_analyzer_tool(code: str) -> str:
     Analyze a Python code snippet and estimate its time and space complexity.
     Input must be valid Python code.
     """
-    from complexity import estimate_complexity
+    from Complexity.Complexity_Code import estimate_complexity
     time_complexity, space_complexity = estimate_complexity(code)
     return (
         f"Time Complexity: {time_complexity}\n"
