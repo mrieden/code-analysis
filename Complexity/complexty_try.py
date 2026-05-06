@@ -26,10 +26,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
 @dataclass
 class DetectionSignals:
     """Raw signals extracted from the AST / source text."""
@@ -37,7 +33,7 @@ class DetectionSignals:
     max_loop_depth: int = 0
     loop_count: int = 0
     recursive_calls: int = 0
-    recursive_branches: int = 0        # max recursive calls on a single line
+    recursive_branches: int = 0        
     halving_detected: bool = False
     memoization_detected: bool = False
     growing_structures: bool = False
@@ -59,10 +55,6 @@ class ComplexityResult:
         )
 
 
-# ---------------------------------------------------------------------------
-# Detector  (extraction only — no inference here)
-# ---------------------------------------------------------------------------
-
 class _SignalDetector(ast.NodeVisitor):
     """Walk the AST and populate a DetectionSignals instance."""
 
@@ -70,13 +62,10 @@ class _SignalDetector(ast.NodeVisitor):
         self._signals = DetectionSignals()
         self._current_loop_depth = 0
 
-    # -- helpers -------------------------------------------------------------
-
     @property
     def signals(self) -> DetectionSignals:
         return self._signals
 
-    # -- visitors ------------------------------------------------------------
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         # Record the outermost function name only
@@ -141,10 +130,6 @@ class _SignalDetector(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-# ---------------------------------------------------------------------------
-# Source-level pattern detector  (regex over raw text for things AST misses)
-# ---------------------------------------------------------------------------
-
 _HALVING_PATTERNS = [
     re.compile(r"(lo|hi|low|high|left|right|mid|start|end)\s*=.*//\s*2"),
     re.compile(r"mid\s*=.*//\s*2"),
@@ -188,14 +173,11 @@ def _detect_source_patterns(
         signals.divide_and_conquer = True
 
 
-# ---------------------------------------------------------------------------
-# Inference  (complexity rules — no AST knowledge here)
-# ---------------------------------------------------------------------------
 
 def _infer_complexity(s: DetectionSignals) -> tuple[str, str, str, str]:
     """Return (time, space, time_reason, space_reason)."""
 
-    # ---- Time complexity ---------------------------------------------------
+    # Time complexity 
     if s.recursive_calls > 0:
         if s.divide_and_conquer:
             has_linear_combine = s.recursive_branches >= 2 or s.max_loop_depth >= 1
@@ -252,7 +234,7 @@ def _infer_complexity(s: DetectionSignals) -> tuple[str, str, str, str]:
         time = f"O(n^{s.max_loop_depth})"
         time_why = f"{s.max_loop_depth} nested loops — polynomial time."
 
-    # ---- Space complexity --------------------------------------------------
+    # Space complexity 
     if s.divide_and_conquer:
         space = "O(n)"
         space_why = (
@@ -276,30 +258,7 @@ def _infer_complexity(s: DetectionSignals) -> tuple[str, str, str, str]:
     return time, space, time_why, space_why
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def analyze(source: str) -> ComplexityResult:
-    """
-    Analyze a Python code snippet and return a ComplexityResult.
-
-    Parameters
-    ----------
-    source : str
-        Python source code (one or more function definitions, or a plain block).
-
-    Returns
-    -------
-    ComplexityResult
-        Contains time/space complexity strings, human-readable reasons, and
-        the raw DetectionSignals for inspection.
-
-    Raises
-    ------
-    SyntaxError
-        If *source* is not valid Python.
-    """
     source = textwrap.dedent(source)
     tree = ast.parse(source)
 

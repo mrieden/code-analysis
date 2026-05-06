@@ -10,11 +10,9 @@ class Child(Parent):
         # ❌ Precondition strengthening: new check
         if x < 10:
             raise ValueError("x must be >= 10")
-
         # ❌ Type narrowing
         if not isinstance(x, int):
             raise TypeError("x must be int")
-
         # ❌ Logical contradiction / narrowing:
         # Parent allows x >= 0 but child requires x >= 10.
         return x * 3
