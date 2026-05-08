@@ -6,12 +6,12 @@ import os
 import tempfile
 import shutil
 from langchain_core.tools import tool
-from ISP_detect import get_isp_report
-from Liskov_Substitution_Principle import get_lsp_report
-from OCP_Detection_Final import get_ocp_report
-from dependancy_principle import get_dip_report
-from SRP_Detection_Final import get_srp_report
-from clean_code import analyze_code_string
+from SOLID.ISP_detect import get_isp_report
+from SOLID.Liskov_Substitution_Principle import get_lsp_report
+from SOLID.OCP_Detection_Final import get_ocp_report
+from SOLID.dependancy_principle import get_dip_report
+from SOLID.SRP_Detection_Final import get_srp_report
+from Clean_code.clean_code import analyze_code_string
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
