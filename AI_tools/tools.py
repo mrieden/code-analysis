@@ -312,7 +312,7 @@ def complexity_analyzer_tool(code: str) -> str:
     Analyze a Python code snippet and estimate its time and space complexity.
     Input must be valid Python code.
     """
-    from complexity import estimate_complexity
+    from Complexity.complexty_try import estimate_complexity
     time_complexity, space_complexity = estimate_complexity(code)
     return (
         f"Time Complexity: {time_complexity}\n"
