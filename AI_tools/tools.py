@@ -6,7 +6,6 @@ import os
 import tempfile
 import shutil
 from langchain_core.tools import tool
-
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
@@ -17,7 +16,7 @@ import sys
 
 sys.path.append(os.path.abspath(".."))
 
-
+from Complexity.complexty_try import estimate_complexity
 from SOLID.ISP_detect import get_isp_report
 from SOLID.Liskov_Substitution_Principle import get_lsp_report
 from SOLID.OCP_Detection_Final import get_ocp_report
@@ -307,47 +306,53 @@ def execute_code_tool(code: str) -> str:
 
 
 @tool
-def complexity_analyzer_tool(code: str) -> str:
+def analysis_tool(code: str) -> str:
     """
-    Analyze a Python code snippet and estimate its time and space complexity.
-    Input must be valid Python code.
+    Analyze a Python code snippet across three dimensions in a single call.
+    Call this tool ONCE with the full source code. Do not call it multiple times.
+
+    The tool returns three clearly labeled sections:
+
+    === Complexity ===
+    Time and space complexity estimates per function.
+
+    === SOLID ===
+    Violations of the five SOLID principles:
+    - SRP: Single Responsibility — class/function does more than one job
+    - OCP: Open/Closed — requires modification instead of extension
+    - LSP: Liskov Substitution — subclass breaks parent contract
+    - ISP: Interface Segregation — interface forces unused method implementation
+    - DIP: Dependency Inversion — high-level modules depend on concrete classes
+
+    === Clean Code ===
+    Code smell score and issues: naming, function length, duplication,
+    comments, formatting, and overall readability.
+
+    Args:
+        code: The full Python source code to analyze.
+
+    Returns:
+        A single string with all three labeled sections.
     """
-    from Complexity.complexty_try import estimate_complexity
     time_complexity, space_complexity = estimate_complexity(code)
-    return (
+    complexity_report = (
         f"Time Complexity: {time_complexity}\n"
         f"Space Complexity: {space_complexity}"
     )
-
-
-@tool
-def solid_analysis_tool(code: str) -> dict:
-    """
-    Analyze Python code for SOLID violations.
-
-    INPUT:
-    - code (str): Full raw source code.
-
-    OUTPUT:
-    - Structured violation report.
-    """
-    results = {
+    solid_results = {
         "SRP": get_srp_report(code),
         "OCP": get_ocp_report(code),
         "LSP": get_lsp_report(code),
         "ISP": get_isp_report(code),
         "DIP": get_dip_report(code),
     }
-    return json.dumps(results, indent=2)
+    clean_code_results = analyze_code_string(code)
 
+    return (
+        f"=== Complexity ===\n{complexity_report}\n\n"
+        f"=== SOLID ===\n{json.dumps(solid_results, indent=2)}\n\n"
+        f"=== Clean Code ===\n{clean_code_results}"
+    )
 
-@tool
-def clean_code_analysis_tool(code: str) -> dict:
-    """
-    Tool wrapper that calls internal clean code analysis functions.
-    """
-    return analyze_code_string(code)
-
-
-analysis_tools = [complexity_analyzer_tool, solid_analysis_tool, clean_code_analysis_tool]
-validator_tool = [complexity_analyzer_tool, solid_analysis_tool, clean_code_analysis_tool, execute_code_tool]
+analysis_tools = [analysis_tool]
+validator_tool = [execute_code_tool]
