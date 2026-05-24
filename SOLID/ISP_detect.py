@@ -15,10 +15,11 @@ class ISPDetector(ast.NodeVisitor):
         self.class_attr_usage  = {}   # class_name → set of self.xxx names accessed/called
         self.class_methods     = {}   # class_name → [method_names]
         self.forced_methods    = {}   # class_name → {method_name: lineno}
-
-        # New for Rule 8 & 9
         self.class_nodes       = {}   # class_name → ast.ClassDef node
         self.class_method_nodes = {}  # class_name → [ast.FunctionDef nodes]
+        # Rule 14: parameter-level dependency tracking
+        # Maps (class_name, param_name, param_type_hint) → set of called method names
+        self.param_method_calls = {}  # class_name → list of (param_hint, {called_methods}, lineno)
 
     # ═══════════════════════════════════════════════════════════
     #  Helpers
@@ -57,7 +58,19 @@ class ISPDetector(ast.NodeVisitor):
           - docstring + any of the above
           - return / return None
           - any combination of the above with no real logic
+
+        NOTE: Does NOT flag @abstractmethod decorated stubs — those are intentional.
         """
+        # If decorated with @abstractmethod, the stub is intentional — skip
+        for decorator in func_node.decorator_list:
+            decorator_name = (
+                decorator.id        if isinstance(decorator, ast.Name)
+                else decorator.attr if isinstance(decorator, ast.Attribute)
+                else None
+            )
+            if decorator_name == "abstractmethod":
+                return False
+
         body = list(func_node.body)
 
         # Strip leading docstring
@@ -109,15 +122,26 @@ class ISPDetector(ast.NodeVisitor):
             total -= 1
         return total
 
-    def _resolve_interface_methods(self, iface_name):
+    def _resolve_interface_methods(self, iface_name, _visited=None):
         """
         Returns the full set of method names for an interface,
         following its own inheritance chain (e.g. IChild extends IParent).
+        Guards against circular inheritance with a visited set.
+        Excludes __init__ and dunder methods to avoid inflating unused counts.
         """
-        if iface_name not in self.interfaces:
+        if _visited is None:
+            _visited = set()
+        if iface_name in _visited or iface_name not in self.interfaces:
             return set()
-        methods = set(self.interfaces[iface_name]["methods"]) - {"__init__"}
-        node    = self.interfaces[iface_name]["node"]
+        _visited.add(iface_name)
+
+        # Exclude __init__ and all other dunders (e.g. __len__, __contains__)
+        # — implementors often don't call these on self, inflating unused counts
+        methods = {
+            m for m in self.interfaces[iface_name]["methods"]
+            if not (m.startswith("__") and m.endswith("__"))
+        }
+        node = self.interfaces[iface_name]["node"]
         for base in node.bases:
             base_id = (
                 base.id        if isinstance(base, ast.Name)
@@ -125,22 +149,52 @@ class ISPDetector(ast.NodeVisitor):
                 else None
             )
             if base_id and base_id in self.interfaces:
-                methods |= self._resolve_interface_methods(base_id)
+                methods |= self._resolve_interface_methods(base_id, _visited)
         return methods
 
-    def _all_interface_bases(self, class_name):
+    def _all_interface_bases(self, class_name, _visited=None):
         """
         Returns every interface base reachable from a class,
         including through class inheritance (ClassB extends ClassA(IFoo)).
+        Guards against circular inheritance.
         """
+        if _visited is None:
+            _visited = set()
+        if class_name in _visited:
+            return []
+        _visited.add(class_name)
+
         ifaces = []
         for base in self.class_implements.get(class_name, []):
             if base in self.interfaces:
                 ifaces.append(base)
-            # walk up the class hierarchy
             if base in self.class_implements:
-                ifaces.extend(self._all_interface_bases(base))
+                ifaces.extend(self._all_interface_bases(base, _visited))
         return ifaces
+
+    def _interface_inheritance_depth(self, iface_name, _visited=None):
+        """
+        Returns the number of interface ancestors (not counting self).
+        Used by Rule 10.
+        """
+        if _visited is None:
+            _visited = set()
+        if iface_name in _visited or iface_name not in self.interfaces:
+            return 0
+        _visited.add(iface_name)
+
+        node = self.interfaces[iface_name]["node"]
+        max_depth = 0
+        for base in node.bases:
+            base_id = (
+                base.id        if isinstance(base, ast.Name)
+                else base.attr if isinstance(base, ast.Attribute)
+                else None
+            )
+            if base_id and base_id in self.interfaces:
+                depth = 1 + self._interface_inheritance_depth(base_id, _visited)
+                max_depth = max(max_depth, depth)
+        return max_depth
 
     @staticmethod
     def _classify_method_domain(method_name: str) -> str | None:
@@ -148,7 +202,17 @@ class ISPDetector(ast.NodeVisitor):
         Returns a domain label for a method name using keyword matching.
         Returns None if the method doesn't match any known domain.
         Used by Rule 8 (standalone class role mixing).
+
+        __str__ and __repr__ are intentionally excluded — they're universal
+        and should not constitute a "ui" domain hit on their own.
         """
+        # Universal dunders: never count as a domain
+        UNIVERSAL_DUNDERS = {"__str__", "__repr__", "__init__", "__del__",
+                             "__new__", "__hash__", "__eq__", "__ne__",
+                             "__lt__", "__le__", "__gt__", "__ge__"}
+        if method_name in UNIVERSAL_DUNDERS:
+            return None
+
         domain_keywords = {
             "persistence": ["save", "load", "store", "fetch", "persist",
                             "insert", "update", "delete", "remove", "put",
@@ -158,8 +222,8 @@ class ISPDetector(ast.NodeVisitor):
             "network":     ["connect", "send", "receive", "request", "socket",
                             "stream", "download", "upload", "ping", "http"],
             "ui":          ["render", "draw", "display", "show", "hide", "paint",
-                            "layout", "refresh", "repaint", "widget", "print",
-                            "format", "str", "repr"],
+                            "layout", "refresh", "repaint", "widget",
+                            "format", "print"],
             "logging":     ["log", "trace", "debug", "audit", "monitor",
                             "report", "warn", "error", "info"],
             "cache":       ["cache", "invalidate", "expire", "flush",
@@ -194,6 +258,7 @@ class ISPDetector(ast.NodeVisitor):
             self.detect_fat_interface(node, methods)
             self.detect_interface_role_mixing(node)
             self.detect_parameter_bloat(node)
+            self.detect_interface_inheritance_depth(node)   # Rule 10
             self.current_interface = None
             return
 
@@ -204,6 +269,7 @@ class ISPDetector(ast.NodeVisitor):
         self.forced_methods[node.name]         = {}
         self.class_nodes[node.name]            = node
         self.class_method_nodes[node.name]     = method_nodes
+        self.param_method_calls[node.name]     = []
 
         for f in node.body:
             if isinstance(f, ast.FunctionDef):
@@ -212,8 +278,12 @@ class ISPDetector(ast.NodeVisitor):
         self.detect_unused_interface_methods(node)
         self.detect_forced_methods(node)
         self.detect_client_role_segregation(node)
-        self.detect_standalone_role_mixing(node)   # Rule 8
-        self.detect_type_dispatch(node)            # Rule 9
+        self.detect_standalone_role_mixing(node)
+        self.detect_type_dispatch(node)
+        self.detect_god_class(node)                         # Rule 13
+        self.detect_optional_method_pattern(node)          # Rule 11
+        self.detect_boolean_flag_dispatch(node)            # Rule 12
+        self.detect_coarse_parameter_dependency(node)      # Rule 14
 
         self.current_class = None
 
@@ -230,6 +300,58 @@ class ISPDetector(ast.NodeVisitor):
             if isinstance(child, ast.Attribute):
                 if isinstance(child.value, ast.Name) and child.value.id == "self":
                     self.class_attr_usage[self.current_class].add(child.attr)
+
+        # Rule 14: track method calls on typed parameters (excluding self)
+        self._track_param_method_calls(node)
+
+    def _track_param_method_calls(self, func_node):
+        """
+        For each annotated non-self parameter that looks like an interface type
+        (name starts with 'I' + uppercase, or ends with 'Interface'),
+        record which methods are called on it within the function body.
+        """
+        args = func_node.args.args
+        if not args:
+            return
+
+        # Build map: param_name → type_hint_name (only for annotated params)
+        param_types = {}
+        for arg in args:
+            if arg.arg == "self":
+                continue
+            if arg.annotation is None:
+                continue
+            hint = (
+                arg.annotation.id   if isinstance(arg.annotation, ast.Name)
+                else arg.annotation.attr if isinstance(arg.annotation, ast.Attribute)
+                else None
+            )
+            if hint and (
+                (hint.startswith("I") and len(hint) > 1 and hint[1].isupper())
+                or hint.endswith("Interface")
+            ):
+                param_types[arg.arg] = hint
+
+        if not param_types:
+            return
+
+        # Walk the function body and collect method calls on these params
+        calls_on_param: dict[str, set] = defaultdict(set)
+        for child in ast.walk(func_node):
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id in param_types
+            ):
+                param_name = child.func.value.id
+                calls_on_param[param_name].add(child.func.attr)
+
+        for param_name, called in calls_on_param.items():
+            hint = param_types[param_name]
+            self.param_method_calls[self.current_class].append(
+                (hint, called, func_node.lineno)
+            )
 
     # Post-visit hook — runs after the entire tree is walked
     def _post_visit(self):
@@ -360,8 +482,6 @@ class ISPDetector(ast.NodeVisitor):
             if not interface_methods:
                 continue
 
-            # A class that *defines* an interface method counts as satisfying it —
-            # only flag methods that are neither called nor overridden.
             defined = set(self.class_methods.get(node.name, []))
             used   = (self.class_attr_usage.get(node.name, set()) | defined) & interface_methods
             unused = interface_methods - used
@@ -396,20 +516,15 @@ class ISPDetector(ast.NodeVisitor):
         if not forced:
             return
 
-        # ── NEW: Only flag forced stubs that come from an interface. ──────────
-        # A standalone class with pass-body helpers is not an ISP violation.
-        # We only care when a concrete class is FORCED by an interface contract
-        # to implement methods it doesn't actually need.
         interface_methods = set()
         for base in self._all_interface_bases(node.name):
             interface_methods |= self._resolve_interface_methods(base)
 
-        # If the class implements no interface, forced stubs are a different
-        # smell (maybe OCP / template method) — not ISP. Skip.
         if not interface_methods:
             return
 
-        # Filter: only report stubs that belong to an interface contract
+        # Only report stubs that belong to an interface contract
+        # and are NOT decorated with @abstractmethod (those are intentional)
         interface_forced = {
             m: lineno
             for m, lineno in forced.items()
@@ -481,6 +596,9 @@ class ISPDetector(ast.NodeVisitor):
                 if base in self.interfaces:
                     iface_to_classes.setdefault(base, []).append(cls_name)
 
+        # Deduplicate: fire at most once per interface (not once per pair)
+        already_flagged_ifaces = set()
+
         for iface_name, implementors in iface_to_classes.items():
             if len(implementors) < 2:
                 continue
@@ -490,7 +608,11 @@ class ISPDetector(ast.NodeVisitor):
                 continue
 
             for i in range(len(implementors)):
+                if iface_name in already_flagged_ifaces:
+                    break
                 for j in range(i + 1, len(implementors)):
+                    if iface_name in already_flagged_ifaces:
+                        break
                     cls_a = implementors[i]
                     cls_b = implementors[j]
                     used_a = (self.class_attr_usage.get(cls_a, set()) | set(self.class_methods.get(cls_a, []))) & iface_methods
@@ -503,6 +625,7 @@ class ISPDetector(ast.NodeVisitor):
                     overlap_ratio = len(overlap) / max(len(used_a), len(used_b))
 
                     if overlap_ratio <= 0.25:
+                        already_flagged_ifaces.add(iface_name)
                         self.violations.append({
                             "interface": iface_name,
                             "lineno":    self.interfaces[iface_name]["lineno"],
@@ -522,57 +645,37 @@ class ISPDetector(ast.NodeVisitor):
                         })
 
     # ── Rule 8: Standalone Class Role Mixing ─────────────────────
-    # NEW: Catches classes with NO interface at all that bundle
-    # multiple unrelated responsibilities into one body.
-    #
-    # How it works:
-    #   1. Skip classes that implement a known interface (covered by Rules 1-7).
-    #   2. Classify each public method into a domain via keyword matching.
-    #   3. Fire when 2+ distinct domains are detected with ≥2 methods each
-    #      (single stray helpers don't count).
-    #
-    # Example caught: TelephoneDirectory mixes persistence (add/delete/update)
-    # with query (lookup) and UI/formatting (__str__).
     def detect_standalone_role_mixing(self, node):
-        # Skip if this class already implements a known interface — Rules 1-7 handle it
         if self._all_interface_bases(node.name):
             return
 
-        # Only look at public methods (skip __dunder__ except __str__/__repr__)
-        INCLUDE_DUNDERS = {"__str__", "__repr__", "__len__", "__contains__"}
+        INCLUDE_DUNDERS = {"__len__", "__contains__"}
         public_methods = [
             f for f in self.class_method_nodes.get(node.name, [])
             if not f.name.startswith("_") or f.name in INCLUDE_DUNDERS
         ]
 
-        # Need at least 3 real methods to make mixing meaningful
         if len(public_methods) < 3:
             return
 
-        # Map domain → list of method names that matched
         domain_methods: dict[str, list[str]] = defaultdict(list)
         for f in public_methods:
             domain = self._classify_method_domain(f.name)
             if domain:
                 domain_methods[domain].append(f.name)
 
-        # Only count domains with ≥ 2 methods (avoids single-stray-method noise)
+        # FIX: require ≥2 methods per domain to count as a significant domain hit
+        # (previously was >= 1, causing single stray methods to trigger the rule)
         significant_domains = {
-            d: ms for d, ms in domain_methods.items() if len(ms) >= 1
+            d: ms for d, ms in domain_methods.items() if len(ms) >= 2
         }
 
-        # Separate "data mutation" domains from "presentation" domains
-        # to avoid false positives on normal CRUD classes
-        MUTATION_DOMAINS   = {"persistence", "file", "network", "cache", "auth"}
-        QUERY_DOMAINS      = {"query"}
+        MUTATION_DOMAINS     = {"persistence", "file", "network", "cache", "auth"}
         PRESENTATION_DOMAINS = {"ui", "logging"}
 
-        mutation_hits      = significant_domains.keys() & MUTATION_DOMAINS
-        presentation_hits  = significant_domains.keys() & PRESENTATION_DOMAINS
-        query_hits         = significant_domains.keys() & QUERY_DOMAINS
+        mutation_hits     = significant_domains.keys() & MUTATION_DOMAINS
+        presentation_hits = significant_domains.keys() & PRESENTATION_DOMAINS
 
-        # Case A: Mixes mutation + presentation (e.g. save + render)
-        # Case B: Mixes 3+ distinct domain groups of any type
         fires = False
         mixed_domains = set()
 
@@ -586,13 +689,11 @@ class ISPDetector(ast.NodeVisitor):
         if not fires:
             return
 
-        # Build readable domain → methods summary
         domain_summary = ", ".join(
             f"{d}({', '.join(significant_domains[d])})"
             for d in sorted(mixed_domains)
         )
 
-        # Suggest split names
         suggestions = ", ".join(
             f"I{d.capitalize()}Operations" if d in MUTATION_DOMAINS
             else f"I{d.capitalize()}"
@@ -617,24 +718,9 @@ class ISPDetector(ast.NodeVisitor):
         })
 
     # ── Rule 9: Type-Dispatch Multiplexing ───────────────────────
-    # NEW: Catches the anti-pattern where a single class uses an integer/string
-    # "type" field to branch into completely unrelated behaviour via if/elif chains.
-    # This is a disguised fat-interface: the class is secretly several classes
-    # merged into one, and every client is forced to drag all variants along.
-    #
-    # Detection strategy:
-    #   1. Look for an `__init__` that accepts a `type` (or `kind`, `mode`) param
-    #      and stores it as `self.type` / `self.kind` / `self.mode`.
-    #   2. Find methods that contain if/elif chains branching on that stored attr.
-    #   3. Count how many distinct literal branches exist (int or str constants).
-    #   4. Fire when ≥ 2 branches are found in ≥ 1 method.
-    #
-    # Example caught: Writer(type=0|1|2) branches into file / socket / DB logic.
     TYPE_PARAM_NAMES = {"type", "kind", "mode", "variant", "strategy"}
 
     def detect_type_dispatch(self, node):
-        # ── Step 1: find stored type-selector attributes ─────────
-        # Look for patterns like:  self.type = type  in __init__
         type_attrs: set[str] = set()
 
         init_node = next(
@@ -654,7 +740,6 @@ class ISPDetector(ast.NodeVisitor):
                         ):
                             type_attrs.add(target.attr)
 
-                # Also catch annotated assignments:  self.type: int = type
                 if isinstance(stmt, ast.AnnAssign):
                     target = stmt.target
                     if (
@@ -668,8 +753,7 @@ class ISPDetector(ast.NodeVisitor):
         if not type_attrs:
             return
 
-        # ── Step 2: find if/elif chains that branch on self.<type_attr> ──
-        dispatching_methods: list[tuple[str, int, set]] = []  # (name, lineno, branches)
+        dispatching_methods: list[tuple[str, int, set]] = []
 
         for func in self.class_method_nodes.get(node.name, []):
             if func.name == "__init__":
@@ -681,8 +765,6 @@ class ISPDetector(ast.NodeVisitor):
         if not dispatching_methods:
             return
 
-        # ── Step 3: fire violation ────────────────────────────────
-        # Count maximum branch variants across all dispatching methods
         max_branches = max(len(b) for _, _, b in dispatching_methods)
         severity = "HIGH" if max_branches >= 3 else "MEDIUM"
 
@@ -714,18 +796,9 @@ class ISPDetector(ast.NodeVisitor):
     def _collect_type_dispatch_branches(
         self, func_node: ast.FunctionDef, type_attrs: set[str]
     ) -> set:
-        """
-        Walk a function body and collect all literal values (int/str) used
-        in comparisons against self.<type_attr>.
-
-        Handles both forms:
-            if self.type == 0: ...
-            if 0 == self.type: ...
-        """
         branches: set = set()
 
         for node in ast.walk(func_node):
-            # We care about If nodes; their test may be a Compare or BoolOp
             if not isinstance(node, ast.If):
                 continue
 
@@ -737,7 +810,6 @@ class ISPDetector(ast.NodeVisitor):
                 if len(ops) != 1 or not isinstance(ops[0], ast.Eq):
                     continue
 
-                # Pattern:  self.type == <literal>
                 if (
                     isinstance(left, ast.Attribute)
                     and isinstance(left.value, ast.Name)
@@ -748,7 +820,6 @@ class ISPDetector(ast.NodeVisitor):
                 ):
                     branches.add(comps[0].value)
 
-                # Pattern:  <literal> == self.type
                 if (
                     isinstance(left, ast.Constant)
                     and len(comps) == 1
@@ -763,10 +834,6 @@ class ISPDetector(ast.NodeVisitor):
 
     @staticmethod
     def _extract_compares(test_node) -> list[ast.Compare]:
-        """
-        Recursively pull Compare nodes out of a test expression,
-        handling BoolOp (and/or) wrappers.
-        """
         if isinstance(test_node, ast.Compare):
             return [test_node]
         if isinstance(test_node, ast.BoolOp):
@@ -775,6 +842,301 @@ class ISPDetector(ast.NodeVisitor):
                 result.extend(ISPDetector._extract_compares(value))
             return result
         return []
+
+    # ── Rule 10: Interface Inheritance Depth ──────────────────────
+    # NEW: An interface that inherits from 3+ other interfaces becomes a
+    # de-facto fat interface. Every implementor is forced to implement the
+    # entire ancestor chain, even if they only need a leaf subset.
+    def detect_interface_inheritance_depth(self, node):
+        DEPTH_THRESHOLD = 2  # more than 2 levels deep is a smell
+        depth = self._interface_inheritance_depth(node.name)
+        if depth <= DEPTH_THRESHOLD:
+            return
+
+        # Collect all ancestor interface names for the message
+        ancestors = []
+        def _collect_ancestors(iface_name, visited=None):
+            if visited is None:
+                visited = set()
+            if iface_name in visited or iface_name not in self.interfaces:
+                return
+            visited.add(iface_name)
+            iface_node = self.interfaces[iface_name]["node"]
+            for base in iface_node.bases:
+                base_id = (
+                    base.id        if isinstance(base, ast.Name)
+                    else base.attr if isinstance(base, ast.Attribute)
+                    else None
+                )
+                if base_id and base_id in self.interfaces:
+                    ancestors.append(base_id)
+                    _collect_ancestors(base_id, visited)
+        _collect_ancestors(node.name)
+
+        severity = "HIGH" if depth >= 4 else "MEDIUM"
+        self.violations.append({
+            "interface": node.name,
+            "lineno":    node.lineno,
+            "severity":  severity,
+            "type":      "Interface Inheritance Depth",
+            "reason": (
+                f"'{node.name}' has an inheritance depth of {depth} "
+                f"(ancestors: {', '.join(ancestors)}). "
+                f"Deep interface chains force implementors to satisfy the entire "
+                f"ancestor contract even when they only need a small subset."
+            ),
+            "suggestion": (
+                f"Flatten '{node.name}' — compose small focused interfaces at the "
+                f"call site rather than inheriting them all into one deep hierarchy."
+            ),
+        })
+
+    # ── Rule 11: Optional Method Pattern ─────────────────────────
+    # NEW: Catches methods in concrete classes that always return a constant
+    # (None, True, False, 0, "") — not a raise-stub, but a semantically empty
+    # implementation that signals the class doesn't need the method.
+    # Only fires when the class implements an interface (otherwise it's not ISP).
+    def detect_optional_method_pattern(self, node):
+        interface_methods = set()
+        for base in self._all_interface_bases(node.name):
+            interface_methods |= self._resolve_interface_methods(base)
+
+        if not interface_methods:
+            return
+
+        optional_hits = []
+        for func in self.class_method_nodes.get(node.name, []):
+            if func.name == "__init__" or func.name not in interface_methods:
+                continue
+            # Skip stubs already caught by Rule 5
+            if func.name in self.forced_methods.get(node.name, {}):
+                continue
+            # Skip @abstractmethod
+            for decorator in func.decorator_list:
+                dec_name = (
+                    decorator.id        if isinstance(decorator, ast.Name)
+                    else decorator.attr if isinstance(decorator, ast.Attribute)
+                    else None
+                )
+                if dec_name == "abstractmethod":
+                    break
+            else:
+                body = list(func.body)
+                # Strip docstring
+                if body and isinstance(body[0], ast.Expr):
+                    val = body[0].value
+                    if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                        body = body[1:]
+
+                # Exactly one statement: a return of a constant (not None — that's Rule 5)
+                if len(body) == 1 and isinstance(body[0], ast.Return):
+                    ret_val = body[0].value
+                    if isinstance(ret_val, ast.Constant) and ret_val.value is not None:
+                        optional_hits.append((func.name, func.lineno, repr(ret_val.value)))
+
+        if not optional_hits:
+            return
+
+        for method, lineno, val in optional_hits:
+            self.violations.append({
+                "class":    node.name,
+                "lineno":   lineno,
+                "severity": "MEDIUM",
+                "type":     "Optional Method Pattern",
+                "reason": (
+                    f"Method '{method}' always returns a constant ({val}), "
+                    f"suggesting this class doesn't actually need it — "
+                    f"it's satisfying the interface contract nominally."
+                ),
+                "suggestion": (
+                    f"If '{method}' is not meaningful for '{node.name}', "
+                    f"split the interface so this class only implements what it uses."
+                ),
+            })
+
+    # ── Rule 12: Boolean Flag Dispatch ───────────────────────────
+    # NEW: Catches classes that store boolean flags in __init__ and branch
+    # on them in multiple methods — a disguised multi-variant class that
+    # forces all clients to carry logic they don't need.
+    # Complements Rule 9 (which only catches named type/kind/mode selectors).
+    BOOL_PARAM_NAMES = {"is_async", "async_mode", "use_cache", "cached",
+                        "compressed", "encrypted", "buffered", "lazy",
+                        "strict", "verbose", "debug", "dry_run", "enabled"}
+
+    def detect_boolean_flag_dispatch(self, node):
+        bool_attrs: set[str] = set()
+
+        init_node = next(
+            (f for f in self.class_method_nodes.get(node.name, [])
+             if f.name == "__init__"),
+            None,
+        )
+        if not init_node:
+            return
+
+        # Collect self.<bool_attr> assignments in __init__
+        for stmt in ast.walk(init_node):
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                        and target.attr in self.BOOL_PARAM_NAMES
+                    ):
+                        bool_attrs.add(target.attr)
+            if isinstance(stmt, ast.AnnAssign):
+                target = stmt.target
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                    and target.attr in self.BOOL_PARAM_NAMES
+                ):
+                    bool_attrs.add(target.attr)
+
+        if not bool_attrs:
+            return
+
+        # Find methods that branch on these bool attrs in if/else
+        branching_methods = []
+        for func in self.class_method_nodes.get(node.name, []):
+            if func.name == "__init__":
+                continue
+            hits = self._find_bool_flag_branches(func, bool_attrs)
+            if hits:
+                branching_methods.append((func.name, func.lineno, hits))
+
+        # Only fire if the flag drives branching in 2+ methods
+        # (a single method is acceptable; it's when behaviour is
+        # systematically split across the whole class that it's ISP)
+        if len(branching_methods) < 2:
+            return
+
+        flag_summary = ", ".join(sorted(bool_attrs))
+        method_summary = ", ".join(f"'{n}'" for n, _, _ in branching_methods)
+
+        self.violations.append({
+            "class":    node.name,
+            "lineno":   node.lineno,
+            "severity": "MEDIUM",
+            "type":     "Boolean Flag Dispatch",
+            "reason": (
+                f"'{node.name}' uses boolean flag(s) ({flag_summary}) set in "
+                f"__init__ to branch into different behaviour across {len(branching_methods)} "
+                f"methods ({method_summary}). This is a disguised multi-variant class — "
+                f"clients that need only one variant are forced to carry the logic of all."
+            ),
+            "suggestion": (
+                f"Split '{node.name}' into one class per variant "
+                f"and extract a shared interface with only the methods each "
+                f"variant actually needs."
+            ),
+        })
+
+    def _find_bool_flag_branches(self, func_node, bool_attrs):
+        """
+        Returns the set of bool attrs that drive if/else branching in func_node.
+        """
+        hits = set()
+        for node in ast.walk(func_node):
+            if not isinstance(node, ast.If):
+                continue
+            # The test is directly `self.<bool_attr>` or `not self.<bool_attr>`
+            test = node.test
+            # Handle: `not self.attr`
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                test = test.operand
+            if (
+                isinstance(test, ast.Attribute)
+                and isinstance(test.value, ast.Name)
+                and test.value.id == "self"
+                and test.attr in bool_attrs
+            ):
+                hits.add(test.attr)
+        return hits
+
+    # ── Rule 13: God Class ────────────────────────────────────────
+    # NEW: A standalone class (no interface) with too many public methods
+    # forces every client to take the entire surface area, even if they
+    # need only one or two methods. This is the class-level ISP smell.
+    GOD_CLASS_THRESHOLD = 10
+
+    def detect_god_class(self, node):
+        # Only for standalone classes not already covered by interface rules
+        if self._all_interface_bases(node.name):
+            return
+
+        INCLUDE_DUNDERS = {"__str__", "__repr__", "__len__", "__contains__",
+                           "__iter__", "__next__", "__getitem__", "__setitem__"}
+        public_methods = [
+            f for f in self.class_method_nodes.get(node.name, [])
+            if not f.name.startswith("_") or f.name in INCLUDE_DUNDERS
+        ]
+
+        count = len(public_methods)
+        if count <= self.GOD_CLASS_THRESHOLD:
+            return
+
+        severity = "HIGH" if count >= self.GOD_CLASS_THRESHOLD + 5 else "MEDIUM"
+        method_names = ", ".join(f.name for f in public_methods)
+
+        self.violations.append({
+            "class":    node.name,
+            "lineno":   node.lineno,
+            "severity": severity,
+            "type":     "God Class",
+            "reason": (
+                f"'{node.name}' exposes {count} public methods ({method_names}). "
+                f"Without an interface, every client that imports this class takes "
+                f"a dependency on its entire surface — a violation of ISP at the "
+                f"class level."
+            ),
+            "suggestion": (
+                f"Extract role-based interfaces (e.g. IReader, IWriter, IValidator) "
+                f"so clients can depend on only the slice they need. "
+                f"Consider whether '{node.name}' should be split into smaller classes."
+            ),
+        })
+
+    # ── Rule 14: Coarse-Grained Parameter Dependency ─────────────
+    # NEW: A function that accepts an interface as a parameter but only calls
+    # 1-2 methods on it is a client with too broad a dependency.
+    # The interface could be split so the function only depends on the
+    # narrow subset it actually uses.
+    def detect_coarse_parameter_dependency(self, node):
+        for iface_hint, called_methods, lineno in self.param_method_calls.get(node.name, []):
+            # We need to know the interface's total method count
+            if iface_hint not in self.interfaces:
+                continue
+
+            iface_methods = self._resolve_interface_methods(iface_hint)
+            if len(iface_methods) < 4:
+                continue  # Too small to matter
+
+            usage_ratio = len(called_methods) / len(iface_methods)
+            if usage_ratio >= 0.5:
+                continue  # Using at least half — reasonable dependency
+
+            severity = "HIGH" if usage_ratio <= 0.2 else "MEDIUM"
+
+            self.violations.append({
+                "class":    node.name,
+                "lineno":   lineno,
+                "severity": severity,
+                "type":     "Coarse-Grained Parameter Dependency",
+                "reason": (
+                    f"A method in '{node.name}' accepts '{iface_hint}' as a parameter "
+                    f"but only calls {len(called_methods)}/{len(iface_methods)} of its "
+                    f"methods ({', '.join(sorted(called_methods))}). "
+                    f"The function depends on far more interface surface than it needs."
+                ),
+                "suggestion": (
+                    f"Extract a narrower interface (e.g. I{iface_hint.lstrip('I')}Reader) "
+                    f"containing only the methods this function calls, and type the "
+                    f"parameter against that instead of the full '{iface_hint}'."
+                ),
+            })
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -799,8 +1161,6 @@ def analyze_isp(code, method_threshold=6, unused_threshold=0.4):
     order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
     detector.violations.sort(key=lambda v: order.get(v.get("severity", "LOW"), 2))
     return detector.violations
-
-
 
 
 def get_isp_report(code_str: str):
@@ -862,10 +1222,267 @@ def get_isp_report(code_str: str):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Entry point — runs all four examples from the issue
+#  Test suite — one VIOLATION + one PASS example per rule (1–14)
 # ═══════════════════════════════════════════════════════════════
 
-EXAMPLE_1_TELEPHONE = """
+# ── Rule 1: Fat Interface ─────────────────────────────────────
+RULE1_VIOLATION = """
+from abc import ABC
+
+class IAnimal(ABC):
+    def eat(self): pass
+    def sleep(self): pass
+    def run(self): pass
+    def swim(self): pass
+    def fly(self): pass
+    def climb(self): pass
+    def hunt(self): pass
+    def migrate(self): pass
+    def hibernate(self): pass
+"""
+
+RULE1_PASS = """
+from abc import ABC
+
+class ISwimmable(ABC):
+    def swim(self): pass
+
+class IFlyable(ABC):
+    def fly(self): pass
+
+class Duck(ISwimmable, IFlyable):
+    def swim(self):
+        print("swimming")
+    def fly(self):
+        print("flying")
+"""
+
+# ── Rule 2: Responsibility Mixing ────────────────────────────
+RULE2_VIOLATION = """
+from abc import ABC
+
+class IUserService(ABC):
+    def login(self, user, password): pass
+    def logout(self, user): pass
+    def send_email(self, user, message): pass
+    def cache_session(self, token): pass
+    def log_activity(self, user, action): pass
+    def render_profile(self, user): pass
+"""
+
+RULE2_PASS = """
+from abc import ABC
+
+class IAuthService(ABC):
+    def login(self, user, password): pass
+    def logout(self, user): pass
+
+class IEmailService(ABC):
+    def send_email(self, user, message): pass
+
+class IProfileRenderer(ABC):
+    def render_profile(self, user): pass
+"""
+
+# ── Rule 3: Parameter Bloat ───────────────────────────────────
+RULE3_VIOLATION = """
+from abc import ABC
+
+class IReportBuilder(ABC):
+    def build(self, title, author, date, footer, header, font, page_size): pass
+    def export(self, path, fmt, dpi, compress, encrypt, watermark): pass
+"""
+
+RULE3_PASS = """
+from abc import ABC
+from dataclasses import dataclass
+
+@dataclass
+class ReportConfig:
+    title: str
+    author: str
+    date: str
+
+class IReportBuilder(ABC):
+    def build(self, config: ReportConfig): pass
+    def export(self, path: str): pass
+"""
+
+# ── Rule 4: Unused Interface Methods ─────────────────────────
+RULE4_VIOLATION = """
+from abc import ABC
+
+class IRepository(ABC):
+    def find_by_id(self, id): pass
+    def find_all(self): pass
+    def save(self, entity): pass
+    def delete(self, id): pass
+    def count(self): pass
+    def exists(self, id): pass
+
+class ReadOnlyCache(IRepository):
+    def find_by_id(self, id):
+        return self._cache.get(id)
+    def find_all(self):
+        return list(self._cache.values())
+    def save(self, entity):
+        raise NotImplementedError
+    def delete(self, id):
+        raise NotImplementedError
+    def count(self):
+        raise NotImplementedError
+    def exists(self, id):
+        raise NotImplementedError
+"""
+
+RULE4_PASS = """
+from abc import ABC
+
+class IReadable(ABC):
+    def find_by_id(self, id): pass
+    def find_all(self): pass
+
+class ReadOnlyCache(IReadable):
+    def find_by_id(self, id):
+        return self._cache.get(id)
+    def find_all(self):
+        return list(self._cache.values())
+"""
+
+# ── Rule 5: Forced Implementation ────────────────────────────
+RULE5_VIOLATION = """
+from abc import ABC
+
+class IFullCRUD(ABC):
+    def create(self, data): pass
+    def read(self, id): pass
+    def update(self, id, data): pass
+    def delete(self, id): pass
+    def bulk_delete(self, ids): pass
+
+class LogViewer(IFullCRUD):
+    def create(self, data):
+        pass
+    def read(self, id):
+        return self._logs.get(id)
+    def update(self, id, data):
+        pass
+    def delete(self, id):
+        pass
+    def bulk_delete(self, ids):
+        pass
+"""
+
+RULE5_PASS = """
+from abc import ABC
+
+class IReadable(ABC):
+    def read(self, id): pass
+
+class LogViewer(IReadable):
+    def read(self, id):
+        return self._logs.get(id)
+"""
+
+# ── Rule 6: Client Role Segregation ──────────────────────────
+RULE6_VIOLATION = """
+from abc import ABC
+
+class IMediaPlayer(ABC):
+    def play(self): pass
+    def pause(self): pass
+    def stop(self): pass
+    def record(self): pass
+    def encode(self): pass
+    def stream(self): pass
+
+class AudioPlayer(IMediaPlayer):
+    def play(self):
+        self._audio.start()
+    def pause(self):
+        self._audio.pause()
+    def stop(self):
+        self._audio.stop()
+    def record(self):
+        raise NotImplementedError
+    def encode(self):
+        raise NotImplementedError
+    def stream(self):
+        raise NotImplementedError
+"""
+
+RULE6_PASS = """
+from abc import ABC
+
+class IPlayable(ABC):
+    def play(self): pass
+    def pause(self): pass
+    def stop(self): pass
+
+class AudioPlayer(IPlayable):
+    def play(self):
+        self._audio.start()
+    def pause(self):
+        self._audio.pause()
+    def stop(self):
+        self._audio.stop()
+"""
+
+# ── Rule 7: Cross-Class Disjoint Usage ───────────────────────
+RULE7_VIOLATION = """
+from abc import ABC
+
+class IDocument(ABC):
+    def read_text(self): pass
+    def read_metadata(self): pass
+    def write_text(self, text): pass
+    def write_metadata(self, meta): pass
+    def render_pdf(self): pass
+    def render_html(self): pass
+
+class TextExtractor(IDocument):
+    def read_text(self):
+        return self._doc.text()
+    def read_metadata(self):
+        return self._doc.meta()
+    def write_text(self, text): pass
+    def write_metadata(self, meta): pass
+    def render_pdf(self): pass
+    def render_html(self): pass
+
+class HtmlRenderer(IDocument):
+    def read_text(self): pass
+    def read_metadata(self): pass
+    def write_text(self, text): pass
+    def write_metadata(self, meta): pass
+    def render_pdf(self): pass
+    def render_html(self):
+        return self._engine.to_html(self._doc)
+"""
+
+RULE7_PASS = """
+from abc import ABC
+
+class IDocumentReader(ABC):
+    def read_text(self): pass
+    def read_metadata(self): pass
+
+class IHtmlRenderer(ABC):
+    def render_html(self): pass
+
+class TextExtractor(IDocumentReader):
+    def read_text(self):
+        return self._doc.text()
+    def read_metadata(self):
+        return self._doc.meta()
+
+class HtmlRenderer(IHtmlRenderer):
+    def render_html(self):
+        return self._engine.to_html(self._doc)
+"""
+
+# ── Rule 8: Standalone Class Role Mixing ─────────────────────
+RULE8_VIOLATION = """
 class TelephoneDirectory:
     def __init__(self):
         self.telephonedirectory = {}
@@ -877,14 +1494,30 @@ class TelephoneDirectory:
         self.telephonedirectory[name] = number
     def lookup_number(self, name):
         return self.telephonedirectory[name]
-    def __str__(self):
-        ret_dct = ""
-        for key, value in self.telephonedirectory.items():
-            ret_dct += f'{key} : {value}\\n'
-        return ret_dct
+    def search_by_prefix(self, prefix):
+        return {k: v for k, v in self.telephonedirectory.items() if k.startswith(prefix)}
+    def render_display(self, fmt):
+        return "\\n".join(f"{k}: {v}" for k, v in self.telephonedirectory.items())
+    def display_summary(self):
+        print(f"Total entries: {len(self.telephonedirectory)}")
 """
 
-EXAMPLE_2_WRITER = """
+RULE8_PASS = """
+class TelephoneDirectory:
+    def __init__(self):
+        self._data = {}
+    def add_entry(self, name, number):
+        self._data[name] = number
+    def delete_entry(self, name):
+        self._data.pop(name)
+    def update_entry(self, name, number):
+        self._data[name] = number
+    def lookup_number(self, name):
+        return self._data[name]
+"""
+
+# ── Rule 9: Type-Dispatch Multiplexing ───────────────────────
+RULE9_VIOLATION = """
 class Writer:
     def __init__(self, type: int) -> None:
         self.type = type
@@ -899,75 +1532,260 @@ class Writer:
             self.db.write()
 """
 
-EXAMPLE_3_SHAPES = """
-class Shape:
-    def compute_area(self):
-        pass
+RULE9_PASS = """
+from abc import ABC
 
-class Rectangle(Shape):
-    def __init__(self, width, height):
-        self._width = width
-        self._height = height
-    def compute_area(self):
-        return self._width * self._height
+class IWriter(ABC):
+    def write(self, contents: bytearray): pass
 
-class Square(Shape):
-    def __init__(self, side):
-        self._side = side
-    def compute_area(self):
-        return self._side * self._side
+class FileWriter(IWriter):
+    def write(self, contents: bytearray):
+        with open("random_file.txt", "w") as f:
+            f.write(contents)
+
+class SocketWriter(IWriter):
+    def write(self, contents: bytearray):
+        self.socket.write(contents)
+
+class DatabaseWriter(IWriter):
+    def write(self, contents: bytearray):
+        self.db.write(contents)
 """
 
-EXAMPLE_4_PIPELINE = """
-from abc import ABC, abstractmethod
+# ── Rule 10: Interface Inheritance Depth ─────────────────────
+RULE10_VIOLATION = """
+from abc import ABC
 
-class ProcessingStep(ABC):
-    @abstractmethod
-    def process(self, df): pass
+class IBase(ABC):
+    def base_op(self): pass
 
-class NormalizeFeature(ProcessingStep):
-    def __init__(self, feature_name):
-        self.feature_name = feature_name
-    def process(self, df):
-        df[self.feature_name] = (df[self.feature_name] - df[self.feature_name].mean()) / df[self.feature_name].std()
-        return df
+class IMid(IBase):
+    def mid_op(self): pass
 
-class EncodeCategoricalFeature(ProcessingStep):
-    def __init__(self, feature_name, encoded_feature_name):
-        self.feature_name = feature_name
-        self.encoded_feature_name = encoded_feature_name
-    def process(self, df):
-        df[self.encoded_feature_name] = df[self.feature_name].astype('category').cat.codes
-        return df
+class ILeaf(IMid):
+    def leaf_op(self): pass
 
-class FillNaNFeature(ProcessingStep):
-    def __init__(self, feature_name, fill_value):
-        self.feature_name = feature_name
-        self.fill_value = fill_value
-    def process(self, df):
-        df[self.feature_name] = df[self.feature_name].fillna(self.fill_value)
-        return df
+class IDeep(ILeaf):
+    def deep_op(self): pass
+"""
+
+RULE10_PASS = """
+from abc import ABC
+
+class IReader(ABC):
+    def read(self): pass
+
+class IWriter(ABC):
+    def write(self, data): pass
+
+class IReadWrite(IReader, IWriter):
+    pass
+"""
+
+# ── Rule 11: Optional Method Pattern ─────────────────────────
+RULE11_VIOLATION = """
+from abc import ABC
+
+class IWorker(ABC):
+    def work(self): pass
+    def stop(self): pass
+    def pause(self): pass
+    def status(self): pass
+
+class SimpleWorker(IWorker):
+    def work(self):
+        print("working")
+    def stop(self):
+        print("stopped")
+    def pause(self):
+        return False
+    def status(self):
+        return 0
+"""
+
+RULE11_PASS = """
+from abc import ABC
+
+class IBasicWorker(ABC):
+    def work(self): pass
+    def stop(self): pass
+
+class SimpleWorker(IBasicWorker):
+    def work(self):
+        print("working")
+    def stop(self):
+        print("stopped")
+"""
+
+# ── Rule 12: Boolean Flag Dispatch ───────────────────────────
+RULE12_VIOLATION = """
+class DataFetcher:
+    def __init__(self, use_cache: bool):
+        self.use_cache = use_cache
+
+    def fetch(self, key):
+        if self.use_cache:
+            return self._cache.get(key)
+        return self._db.get(key)
+
+    def invalidate(self, key):
+        if self.use_cache:
+            self._cache.delete(key)
+        else:
+            pass
+
+    def stats(self):
+        if self.use_cache:
+            return self._cache.stats()
+        return {}
+"""
+
+RULE12_PASS = """
+class DbFetcher:
+    def fetch(self, key):
+        return self._db.get(key)
+    def invalidate(self, key):
+        pass
+    def stats(self):
+        return {}
+
+class CachedFetcher:
+    def fetch(self, key):
+        return self._cache.get(key)
+    def invalidate(self, key):
+        self._cache.delete(key)
+    def stats(self):
+        return self._cache.stats()
+"""
+
+# ── Rule 13: God Class ────────────────────────────────────────
+RULE13_VIOLATION = """
+class UserManager:
+    def create_user(self, name, email): pass
+    def delete_user(self, user_id): pass
+    def update_user(self, user_id, data): pass
+    def get_user(self, user_id): pass
+    def list_users(self): pass
+    def authenticate(self, email, password): pass
+    def reset_password(self, user_id): pass
+    def send_welcome_email(self, user_id): pass
+    def log_activity(self, user_id, action): pass
+    def export_users_csv(self): pass
+    def import_users_csv(self, file_path): pass
+"""
+
+RULE13_PASS = """
+class UserRepository:
+    def create(self, name, email): pass
+    def delete(self, user_id): pass
+    def update(self, user_id, data): pass
+    def get(self, user_id): pass
+    def list_all(self): pass
+
+class AuthService:
+    def authenticate(self, email, password): pass
+    def reset_password(self, user_id): pass
+
+class UserNotifier:
+    def send_welcome_email(self, user_id): pass
+"""
+
+# ── Rule 14: Coarse-Grained Parameter Dependency ─────────────
+RULE14_VIOLATION = """
+from abc import ABC
+
+class IStorage(ABC):
+    def read(self, key): pass
+    def write(self, key, value): pass
+    def delete(self, key): pass
+    def list_keys(self): pass
+    def exists(self, key): pass
+    def clear(self): pass
+
+class ReportGenerator:
+    def generate(self, storage: IStorage, report_id: str):
+        data = storage.read(report_id)
+        return data
+"""
+
+RULE14_PASS = """
+from abc import ABC
+
+class IReadable(ABC):
+    def read(self, key): pass
+
+class ReportGenerator:
+    def generate(self, storage: IReadable, report_id: str):
+        data = storage.read(report_id)
+        return data
 """
 
 
 if __name__ == "__main__":
     examples = [
-        ("Example 1 — TelephoneDirectory (should flag: Standalone Role Mixing)", EXAMPLE_1_TELEPHONE),
-        ("Example 2 — Writer           (should flag: Type-Dispatch Multiplexing)", EXAMPLE_2_WRITER),
-        ("Example 3 — Shapes           (should PASS cleanly)", EXAMPLE_3_SHAPES),
-        ("Example 4 — Pipeline         (should PASS cleanly)", EXAMPLE_4_PIPELINE),
+        # ── violations ───────────────────────────────────────────
+        ("Rule 1  VIOLATION — Fat Interface          (IAnimal)",            RULE1_VIOLATION,  "Violation"),
+        ("Rule 2  VIOLATION — Responsibility Mixing  (IUserService)",       RULE2_VIOLATION,  "Violation"),
+        ("Rule 3  VIOLATION — Parameter Bloat        (IReportBuilder)",     RULE3_VIOLATION,  "Violation"),
+        ("Rule 4  VIOLATION — Unused Interface Meth  (ReadOnlyCache)",      RULE4_VIOLATION,  "Violation"),
+        ("Rule 5  VIOLATION — Forced Implementation  (LogViewer)",          RULE5_VIOLATION,  "Violation"),
+        ("Rule 6  VIOLATION — Client Role Segreg.    (AudioPlayer)",        RULE6_VIOLATION,  "Violation"),
+        ("Rule 7  VIOLATION — Cross-Class Disjoint   (IDocument)",          RULE7_VIOLATION,  "Violation"),
+        ("Rule 8  VIOLATION — Standalone Role Mix    (TelephoneDirectory)", RULE8_VIOLATION,  "Violation"),
+        ("Rule 9  VIOLATION — Type-Dispatch Mux      (Writer)",             RULE9_VIOLATION,  "Violation"),
+        ("Rule 10 VIOLATION — Inheritance Depth      (IDeep)",              RULE10_VIOLATION, "Violation"),
+        ("Rule 11 VIOLATION — Optional Method        (SimpleWorker)",       RULE11_VIOLATION, "Violation"),
+        ("Rule 12 VIOLATION — Boolean Flag Dispatch  (DataFetcher)",        RULE12_VIOLATION, "Violation"),
+        ("Rule 13 VIOLATION — God Class              (UserManager)",        RULE13_VIOLATION, "Violation"),
+        ("Rule 14 VIOLATION — Coarse Param Dep       (ReportGenerator)",    RULE14_VIOLATION, "Violation"),
+        # ── clean passes ─────────────────────────────────────────
+        ("Rule 1  PASS      — Focused interfaces     (Duck)",               RULE1_PASS,  "Pass"),
+        ("Rule 2  PASS      — One interface/domain   (IAuthService etc.)",  RULE2_PASS,  "Pass"),
+        ("Rule 3  PASS      — Param objects          (ReportConfig)",       RULE3_PASS,  "Pass"),
+        ("Rule 4  PASS      — Narrow interface       (IReadable)",          RULE4_PASS,  "Pass"),
+        ("Rule 5  PASS      — Only what's needed     (LogViewer+IReadable)",RULE5_PASS,  "Pass"),
+        ("Rule 6  PASS      — IPlayable only         (AudioPlayer)",        RULE6_PASS,  "Pass"),
+        ("Rule 7  PASS      — Split by client        (IDocumentReader etc)",RULE7_PASS,  "Pass"),
+        ("Rule 8  PASS      — Cohesive CRUD class    (TelephoneDirectory)", RULE8_PASS,  "Pass"),
+        ("Rule 9  PASS      — One class per variant  (FileWriter etc.)",    RULE9_PASS,  "Pass"),
+        ("Rule 10 PASS      — Shallow composition    (IReadWrite)",         RULE10_PASS, "Pass"),
+        ("Rule 11 PASS      — Trimmed interface      (IBasicWorker)",       RULE11_PASS, "Pass"),
+        ("Rule 12 PASS      — Separate classes       (DbFetcher etc.)",     RULE12_PASS, "Pass"),
+        ("Rule 13 PASS      — Split by role          (UserRepository etc)", RULE13_PASS, "Pass"),
+        ("Rule 14 PASS      — Narrow param type      (IReadable)",          RULE14_PASS, "Pass"),
     ]
 
-    for title, code in examples:
-        print(f"\n{'═'*70}")
-        print(f"  {title}")
-        print('═'*70)
+    passed = failed = 0
+    failures = []
+
+    for title, code, expected in examples:
         report = get_isp_report(code)
-        print(f"  Status : {report['status']}")
-        print(f"  Summary: {report['reason']}")
+        got    = report["status"]
+        ok     = (got == expected) or (expected == "Violation" and got == "Violation")
+        symbol = "✓" if ok else "✗"
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+            failures.append((title, expected, got, report["reason"]))
+
+        print(f"\n{'═'*74}")
+        print(f"  {symbol}  {title}")
+        print(f"     Expected: {expected:<10}  Got: {got}")
+        print('═'*74)
         if report["violations"]:
             for v in report["violations"]:
                 target = v.get("interface", v.get("class", "Unknown"))
-                print(f"\n  [{v['severity']}] {v['type']} — {target} (line {v.get('lineno', '?')})")
+                print(f"  [{v['severity']}] {v['type']} — {target} (line {v.get('lineno','?')})")
                 print(f"  Reason    : {v['reason']}")
                 print(f"  Suggestion: {v['suggestion']}")
+        else:
+            print(f"  {report['reason']}")
+
+    print(f"\n{'═'*74}")
+    print(f"  RESULTS: {passed} passed, {failed} failed out of {len(examples)} examples")
+    if failures:
+        print("\n  FAILURES:")
+        for title, exp, got, reason in failures:
+            print(f"    ✗ {title}")
+            print(f"      Expected {exp}, got {got}: {reason}")

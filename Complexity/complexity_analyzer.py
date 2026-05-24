@@ -688,7 +688,7 @@ if __name__ == "__main__":
     process([1, 2, 3])
 """, "O(n)", "O(n)"),
 
-        ("v1 · Cubic — triple nested loops", """
+        ("Cubic — triple nested loops", """
 def count_triplets(arr):
     count = 0
     for i in arr:
@@ -698,14 +698,14 @@ def count_triplets(arr):
     return count
 """, "O(n^3)", "O(1)"),
 
-        ("v1 · Linear recursion — single branch", """
+        ("Linear recursion — single branch", """
 def countdown(n):
     if n <= 0:
         return
     countdown(n - 1)
 """, "O(n)", "O(n)"),
 
-        ("v1 · O(n log n) — sort then single loop", """
+        (" O(n log n) — sort then single loop", """
 def sort_then_scan(arr):
     arr = sorted(arr)
     result = 0
@@ -714,14 +714,14 @@ def sort_then_scan(arr):
     return result
 """, "O(n log n)", "O(n)"),
 
-        ("v1 · Quadratic — sort inside loop", """
+        ("Quadratic — sort inside loop", """
 def bogosort_step(arr):
     for _ in range(len(arr)):
         arr = sorted(arr)
     return arr
 """, "O(n² log n)", "O(n)"),
 
-        ("v1 · O(n²) — sum() inside loop", """
+        ("O(n²) — sum() inside loop", """
 def prefix_sums(arr):
     result = []
     for i in range(len(arr)):
@@ -729,7 +729,7 @@ def prefix_sums(arr):
     return result
 """, "O(n²)", "O(n)"),
 
-        ("v1 · O(log n) — recursive binary search", """
+        (" O(log n) — recursive binary search", """
 def bin_search(arr, target, lo, hi):
     if lo > hi:
         return -1
@@ -742,7 +742,7 @@ def bin_search(arr, target, lo, hi):
         return bin_search(arr, target, lo, mid - 1)
 """, "O(log n)", "O(log n)"),
 
-        ("v1 · DP with explicit memo dict", """
+        (" DP with explicit memo dict", """
 def dp_fib(n):
     memo = {}
     def helper(k):
@@ -755,7 +755,7 @@ def dp_fib(n):
     return helper(n)
 """, "O(n)", "O(n)"),
 
-        ("v1 · Growing list — O(n) space", """
+        (" Growing list — O(n) space", """
 def build_list(n):
     result = []
     for i in range(n):
@@ -799,5 +799,5 @@ def build_list(n):
 
 
 import sys as _sys
-if len(_sys.argv) > 1 and _sys.argv[1] == "--test":
+if __name__ == "__main__":
     _run_tests()
