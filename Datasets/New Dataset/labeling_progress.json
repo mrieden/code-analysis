@@ -1,0 +1,55 @@
+{
+  "labels": {
+    "0": {
+      "srp": "Violation",
+      "ocp": "Violation",
+      "lsp": "Pass",
+      "isp": "Pass",
+      "dip": "Pass"
+    },
+    "1": {
+      "srp": "Pass",
+      "ocp": "Pass",
+      "lsp": "Pass",
+      "isp": "Pass",
+      "dip": "Pass"
+    },
+    "2": {
+      "srp": "Pass",
+      "ocp": "Pass",
+      "lsp": "Pass",
+      "isp": "Pass",
+      "dip": "Pass"
+    },
+    "3": {
+      "srp": "Pass",
+      "ocp": "Pass",
+      "lsp": "Pass",
+      "isp": "Pass",
+      "dip": "Pass"
+    },
+    "4": {
+      "srp": "Violation",
+      "ocp": "Violation",
+      "lsp": "Pass",
+      "isp": "Pass",
+      "dip": "Pass"
+    },
+    "5": {
+      "srp": "Pass",
+      "ocp": "Pass",
+      "lsp": "Violation",
+      "isp": "Violation",
+      "dip": "Pass"
+    },
+    "6": {
+      "srp": "Pass",
+      "ocp": "Violation",
+      "lsp": "Pass",
+      "isp": "Violation",
+      "dip": "Pass"
+    }
+  },
+  "current_pos": 7,
+  "saved_at": "2026-05-29 01:45:24"
+}
