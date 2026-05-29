@@ -1,36 +1,3 @@
-"""
-complexity_analyzer.py  (v2)
-============================
-Improvements over v1
---------------------
-FIX 1 — O(n²) missed (280 cases)
-    Implicit O(n) operations inside a loop now bump the effective loop depth:
-    - `x in list/tuple`  (linear scan)
-    - list comprehensions / generator expressions  (treated as a hidden loop)
-    - calls to known O(n) builtins: min(), max(), sum(), any(), all(), count(),
-      index(), remove(), reverse(), copy()
-    - str methods that scan: .find(), .index(), .count(), .replace(), .split(),
-      .join(), .startswith(), .endswith()
-    - dict/set .update(), .intersection(), .union(), .difference()
-
-FIX 2 — O(n log n) missed (84 cases)
-    Calls to sorted() / .sort() / heapq.* / bisect.* are detected as
-    implicit O(n log n) work. When found inside a loop the total becomes
-    O(n² log n); alone they set the floor to O(n log n).
-
-FIX 3 — O(n) predicted as O(2ⁿ) (70 cases)
-    The recursive-call counter was firing on *any* function with the same
-    name in the file, including helper definitions called from a driver.
-    Fix: only count recursive calls that appear *inside the body of the
-    function that owns that name*, not in nested defs with a different name.
-    Also, calls inside `if __name__ == "__main__"` blocks are excluded.
-
-FIX 4 — O(n) predicted as O(1) (61 cases)
-    Loops inside nested helper functions are now counted toward the
-    total via `total_loops_in_file` so a function that delegates entirely
-    to helpers still shows non-zero depth.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -66,7 +33,7 @@ class DetectionSignals:
     growing_structures: bool = False
     divide_and_conquer: bool = False
     implicit_linear_in_loop: bool = False
-    inner_recursive_memo: bool = False  # nested helper with memoization
+    inner_recursive_memo: bool = False 
 
 
 @dataclass
