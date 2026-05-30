@@ -69,8 +69,8 @@ DEFAULT_WEIGHTS = {
     "effective_domain_div":  0.22,   # name-inferred domain spread
     "lcom":                  0.20,   # structural cohesion (collaborator-weighted)
     "object_diversity":      0.15,   # external-object Jaccard (fires for non-self calls)
-    "size_factor":           0.08,   # large/complex method spread
-    "responsibility_factor": 0.05,   # FIX 5: And/Or name heuristic (restored)
+    "size_factor":           0.1,   # large/complex method spread
+    "responsibility_factor": 0.4,   # FIX 5: And/Or name heuristic (restored)
 }
 
 
