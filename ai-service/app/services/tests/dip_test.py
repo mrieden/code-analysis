@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from SOLID.dependancy_principle          import get_dip_report
+from dependancy_principle          import get_dip_report
 
 
 # ── Rule 1: DIP001 — __init__ parameter typed with a concrete class ──────────
