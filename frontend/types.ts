@@ -1,0 +1,12 @@
+export enum Page {
+  DASHBOARD            = 'DASHBOARD',
+  RESULTS              = 'RESULTS',
+  SOLID_REPORT         = 'SOLID_REPORT',
+  TIME_COMPLEXITY_REPORT  = 'TIME_COMPLEXITY_REPORT',
+  SPACE_COMPLEXITY_REPORT = 'SPACE_COMPLEXITY_REPORT',
+  CLEAN_CODE_REPORT    = 'CLEAN_CODE_REPORT',
+  OPTIMIZE_REPORT      = 'OPTIMIZE_REPORT',
+  ABOUT                = 'ABOUT',
+  HELP                 = 'HELP',
+  LOGIN                = 'LOGIN',
+}
