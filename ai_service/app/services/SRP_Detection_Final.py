@@ -647,7 +647,7 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
                 "status":     "Pass",
                 "confidence": "high",
                 "reason":     "No classes detected.",
-                "suggestion": "Define a class to see SRP analysis.",
+                # "suggestion": "Define a class to see SRP analysis.",
             }]
 
         results = []
@@ -717,12 +717,12 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
                             f"Class '{class_name}' scored {score}%{threshold_note} — "
                             f"borderline result, manual review recommended. {reason_str}."
                         ),
-                        "suggestion": (
-                            f"Inspect '{class_name}' for mixed concerns,{domain_hint}. "
-                            "Score is in the uncertain zone; context matters here."
-                        ),
-                        "diagnostics": diag,
-                        "constructor": ctor,
+                        # "suggestion": (
+                        #     f"Inspect '{class_name}' for mixed concerns,{domain_hint}. "
+                        #     "Score is in the uncertain zone; context matters here."
+                        # ),
+                        # "diagnostics": diag,
+                        # "constructor": ctor,
                     })
                 else:
                     results.append({
@@ -734,11 +734,11 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
                             f"Class '{class_name}' scored {score}%{threshold_note} — "
                             f"{reason_str}."
                         ),
-                        "suggestion": (
-                            f"Split '{class_name}' into focused classes,{domain_hint}."
-                        ),
-                        "diagnostics": diag,
-                        "constructor": ctor,
+                        # "suggestion": (
+                        #     f"Split '{class_name}' into focused classes,{domain_hint}."
+                        # ),
+                        # "diagnostics": diag,
+                        # "constructor": ctor,
                     })
             else:
                 results.append({
@@ -747,9 +747,9 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
                     "confidence": conf,
                     "score":      score,
                     "reason":     f"Class '{class_name}' appears cohesive (score: {score}%).",
-                    "suggestion": "No refactor needed.",
-                    "diagnostics": diag,
-                    "constructor": ctor,
+                    # "suggestion": "No refactor needed.",
+                    # "diagnostics": diag,
+                    # "constructor": ctor,
                 })
 
         return results

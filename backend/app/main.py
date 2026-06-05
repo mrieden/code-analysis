@@ -19,19 +19,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(BACKEND_APP_PATH, "..", "..", "d
 sys.path.insert(0, AI_SERVICE_PATH)    # for graph, services, agents, etc.
 
 # ── SOLID / Complexity / Clean Code imports ───────────────────
-from services import (
-    get_srp_report, get_ocp_report, get_lsp_report,
-    get_isp_report, get_dip_report,
-    analyze_code_string as get_clean_report,
-    estimate_complexity,
-)
+from ai_service.app.services.SRP_Detection_Final           import get_srp_report
+from ai_service.app.services.OCP_Detection_Final           import get_ocp_report
+from ai_service.app.services.Liskov_Substitution_Principle import get_lsp_report
+from ai_service.app.services.ISP_detect                    import get_isp_report
+from ai_service.app.services.dependancy_principle          import get_dip_report
+from ai_service.app.services.complexity         import estimate_complexity
+from ai_service.app.services.clean_code           import get_clean_report
 
 # ── Agent graph import ────────────────────────────────────────
-from graph import build_graph
+from ai_service.app.graph import build_graph
 
 # ── Auth & DB imports ─────────────────────────────────────────
-from auth import get_current_user, router as auth_router
-from database import db
+from database.auth import get_current_user, router as auth_router
+from database.database import db
 
 # ── LangChain ─────────────────────────────────────────────────
 from langchain_core.messages import HumanMessage
@@ -305,7 +306,7 @@ async def websocket_endpoint(websocket: WebSocket):
     current_user = None
     if token:
         try:
-            from auth import decode_token
+            from database.auth import decode_token
             current_user = await decode_token(token)
         except Exception:
             pass
