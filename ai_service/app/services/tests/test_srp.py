@@ -3,7 +3,11 @@ Calibration test suite for the improved SRP analyzer.
 Each fixture is a named module-level constant; the examples list drives the runner.
 """
 import sys
-from srp_analyzer import get_srp_report
+import os
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+from SRP_Detection_Final import get_srp_report
 
 # ── SRP001 VIOLATION — body-blind: generic method names hide cross-domain calls ──
 SRP001_VIOLATION = """
