@@ -758,7 +758,7 @@ def get_lsp_report(code_str: str) -> dict:
                 }
                 for v in sorted(violations, key=lambda v: v.line)
             ],
-            "suggestion": "Keep subclass behavior compatible with parent contracts.",
+            # "suggestion": "Keep subclass behavior compatible with parent contracts.",
         }
     except SyntaxError as e:
         return {"status": "Error", "reason": f"Syntax error: {e}", "violations": []}
