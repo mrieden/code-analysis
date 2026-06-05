@@ -726,7 +726,7 @@ def get_srp_report(code: str, weights: dict | None = None) -> list[dict]:
             return [{
                 "status":     "Pass",
                 "confidence": "high",
-                "reason":     "All classes passed SRP analysis. No violations detected.",
+                "reason":     "No violations detected.",
             }]
 
         return results
