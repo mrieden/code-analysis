@@ -260,7 +260,7 @@ ${refactored}
           {/* After */}
           <div className="flex flex-col items-center">
             <p className="text-xs text-text-secondary uppercase tracking-wider mb-3">After</p>
-            <ScoreCircle score={scoreAfter} variant={scoreDelta > 0 ? 'green' : 'default'} />
+            <ScoreCircle score={scoreAfter} baseScore={scoreBefore} />
           </div>
         </div>
       </div>

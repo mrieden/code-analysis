@@ -14,26 +14,30 @@ interface HistorySidebarProps {
   isOpen: boolean;
   onClose: () => void;
   onLoadEntry: (entry: HistoryEntry) => void;
+  onViewTrends: () => void;
   token: string | null;
 }
 
-const HistorySidebar: React.FC<HistorySidebarProps> = ({ isOpen, onClose, onLoadEntry, token }) => {
+const API = 'http://localhost:8000';
+
+const HistorySidebar: React.FC<HistorySidebarProps> = ({ isOpen, onClose, onLoadEntry, onViewTrends, token }) => {
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen && token) fetchHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, token]);
 
   const fetchHistory = async () => {
     setLoading(true);
     try {
-      const res = await fetch('http://localhost:8000/history', {
+      const res = await fetch(`${API}/history`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      setEntries(data);
+      setEntries(Array.isArray(data) ? data : []);
     } catch (e) {
       console.error('Failed to fetch history:', e);
     } finally {
@@ -44,11 +48,11 @@ const HistorySidebar: React.FC<HistorySidebarProps> = ({ isOpen, onClose, onLoad
   const deleteEntry = async (entryId: string) => {
     setDeletingId(entryId);
     try {
-      await fetch(`http://localhost:8000/history/${entryId}`, {
+      await fetch(`${API}/history/${entryId}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
-      setEntries(prev => prev.filter(e => e.entry_id !== entryId));
+      setEntries((prev) => prev.filter((e) => e.entry_id !== entryId));
     } catch (e) {
       console.error('Failed to delete:', e);
     } finally {
@@ -99,6 +103,23 @@ const HistorySidebar: React.FC<HistorySidebarProps> = ({ isOpen, onClose, onLoad
             ✕
           </button>
         </div>
+
+        {/* View trends button */}
+        {token && entries.length > 0 && (
+          <div className="px-3 pt-3">
+            <button
+              onClick={onViewTrends}
+              className="w-full flex items-center justify-center gap-2 text-xs font-bold py-2 rounded-lg
+                         bg-accent-primary/10 border border-accent-primary/30 text-accent-primary
+                         hover:bg-accent-primary/20 transition-all"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 17l6-6 4 4 8-8m0 0h-5m5 0v5" />
+              </svg>
+              View Trends
+            </button>
+          </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto py-3 px-3 space-y-2">

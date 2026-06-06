@@ -1,241 +1,262 @@
-# 🛡️ CodeGuard
+> Multi-agent Python code analysis and automated refactoring, exposed through a full-stack web app (React + FastAPI) and powered by LangGraph.
+> 
 
-> Multi-agent Python code analysis and automated refactoring powered by LangGraph.
+Astivora takes raw code, detects its language, runs deterministic SOLID / complexity / clean-code analysis, then drives an agentic LangGraph pipeline that automatically refactors the code, validates it, and (for Python) executes it in a hardened Docker sandbox. Python is analyzed directly; Java and C++ are translated to Python, processed, then translated back.
 
----
+The project is a **monorepo** with four cooperating parts:
 
-## What is CodeGuard?
+| Part | Path | Stack | Role |
+| --- | --- | --- | --- |
+| Frontend | `frontend/` | Vite + React 19 + TypeScript | Web UI: editor, live analysis, reports, history, GitHub repo analysis |
+| Backend API | `backend/` | FastAPI + Uvicorn | WebSocket + REST API, GitHub OAuth, history persistence |
+| AI service | `ai_service/` | LangGraph + LangChain | The multi-agent analysis/refactor pipeline, plus a standalone Streamlit UI and CLI |
+| Database / Auth | `database/` | MongoDB (Motor) + JWT | GitHub OAuth, user records, analysis history |
 
-CodeGuard is an agentic pipeline that takes raw Python code, analyzes it for quality issues, automatically refactors it, and validates the result — all without human intervention.
+<aside>
+🔗
 
-### Architecture
+The backend imports the analysis engine and agent graph directly from `ai_service/app` via `sys.path`, so the two services run in one Python process.
 
-CodeGuard is built on **LangGraph**, a framework for building stateful multi-agent workflows as directed graphs. The system is composed of two LLM agents and three plain-function nodes, each with a specific role:
+</aside>
 
-```
-[Input Code]
-     │
-     ▼
-┌─────────────┐
-│  Analyzer   │ ◄──── analysis_tool (complexity + SOLID + clean code index)
-│  (function) │       called directly — no LLM, no message history
-└──────┬──────┘
-       │  original_analyzer_report (captured once, never overwritten)
-       ▼
-┌─────────────┐
-│  Refactor   │ ◄──── LLM rewrites code based on analysis report
-│   Agent     │       REFACTOR_SYSTEM_PROMPT (1st pass)
-│   (LLM)     │       REFACTOR_SYSTEM_PROMPT2 (subsequent passes)
-└──────┬──────┘
-       │  refactored_code
-       ▼
-┌─────────────┐     SyntaxError + error message
-│   Syntax    │ ──────────────────────────────► Refactor Agent (retry)
-│   Check     │
-│  (function) │  ast.parse() only — no LLM
-└──────┬──────┘
-       │  valid code
-       ▼
-┌─────────────┐               ┌──────────────┐
-│  Analyzer   │ ── report ──► │  Comparator  │ ◄──── diffs original vs refactored report
-│  (function) │               │    Agent     │       RESOLVED / UNRESOLVED / REGRESSED
-│  re-analyze │               │    (LLM)     │       outputs numbered Refactor Instructions
-│ refactored  │               └──────┬───────┘              on FAIL
-│    code     │                      │
-└─────────────┘            PASS ─────┼───── FAIL ──► Refactor Agent (max 3 iterations)
-                                     ▼
-                              ┌─────────────┐
-                              │  Executor   │ ◄──── execute_code_tool
-                              │ (function)  │       runs code in Docker sandbox
-                              └──────┬──────┘       no LLM involved
-                                     │
-                          PASS ──► END
-                          FAIL ──► Refactor Agent (counted in refactor iterations)
-```
+## Architecture (AI pipeline)
 
-**LLM Agents** — only two nodes use a language model:
-- **Refactor Agent** — rewrites code to fix all flagged issues. Uses `REFACTOR_SYSTEM_PROMPT` on the first pass and `REFACTOR_SYSTEM_PROMPT2` on subsequent passes (fixes only what the Comparator or Executor flagged, without regressing already-resolved issues).
-- **Comparator Agent** — receives `original_analyzer_report` + `analyzer_report` (refactored). Diffs them, classifies every issue as `RESOLVED` / `UNRESOLVED` / `REGRESSED`, and outputs numbered Refactor Instructions on `FAIL`. No tools, no code — reports only.
+The pipeline wires **four LLM agents** together with several deterministic (non-LLM) nodes as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
 
-**Plain-function nodes** — three nodes run deterministic logic with no LLM:
-- **Analyzer** — calls `analysis_tool` directly. Runs twice: once on the original code (result stored as `original_analyzer_report`, never overwritten), and once on the refactored code before the Comparator.
-- **Syntax Check** — runs `ast.parse()` on the refactored code. Sends the error message back to the Refactor Agent on failure; continues to re-analysis on success.
-- **Executor** — calls `execute_code_tool` directly. Runs the refactored code in a Docker sandbox and sends runtime errors back to the Refactor Agent.
+```mermaid
+flowchart TD
+	Start([START]) --> Detect[detect_language]
 
-**Tools** are Python functions decorated with `@tool`:
-- `analysis_tool` — single merged tool: time & space complexity, SOLID violations (SRP/OCP/LSP/ISP/DIP), and clean code index. Called directly by the Analyzer function — not by any LLM.
-- `execute_code_tool` — runs code in a Docker sandbox (`python:3.11-slim`), 10s timeout, 128MB memory, network disabled. Called directly by the Executor function — not by any LLM.
+	Detect -->|unsupported / unknown| E1([END])
+	Detect -->|python| Analyzer[analyzer]
+	Detect -->|java / cpp| ToPy["Translate to Python"]
 
-**The Graph** (defined in `graph.py`) wires the nodes together with conditional edges:
-- **Syntax Check** loops back to Refactor Agent on `ast.parse()` failure
-- **Comparator Agent** loops back to Refactor Agent if any issue is `UNRESOLVED` or `REGRESSED`
-- **Executor** loops back to Refactor Agent on runtime errors
-- Maximum of **3 refactor iterations** before the pipeline exits
+	ToPy -->|first pass| Syn2[syntax_check2]
+	ToPy -->|re-entry| E2([END])
+	Syn2 -->|fix| ToPy
+	Syn2 -->|proceed| Analyzer
+	Syn2 -->|max iterations| E3([END])
 
-**State** (`AgentState`) is a typed dictionary shared across all nodes:
+	Analyzer --> Architect[architect]
 
-| Field | Description |
-|-------|-------------|
-| `original_code` | Input code — never changes |
-| `refactored_code` | Latest refactor output |
-| `original_analyzer_report` | Captured on first Analyzer run — never overwritten |
-| `analyzer_report` | Overwritten each Analyzer run (used as Comparator's refactored report) |
-| `comparator_report` | Latest Comparator output, fed back to Refactor Agent on FAIL |
-| `syntax_error` | Populated by Syntax Check on failure, cleared on success |
-| `execution_result` | Populated by Executor, fed back to Refactor Agent on FAIL |
-| `refactor_iterations` | Loop counter — hard stop at 3 |
+	Architect -->|HALT_PERFECT_ENOUGH| E4([END])
+	Architect -->|no refactor yet| Refactor["Refactor Agent"]
+	Architect -->|already refactored| Comparator["Comparator Agent"]
 
-### Project Structure
+	Refactor --> Syn[syntax_check]
+	Syn -->|fix| Refactor
+	Syn -->|proceed| Analyzer
+	Syn -->|max iterations| E5([END])
 
-```
-CodeGuard/
-├── main.py               # CLI entry point
-├── app.py                # Streamlit web UI
-├── graph.py              # LangGraph graph definition and routing logic
-├── agents.py             # Analyzer, Refactor, Comparator, and Executor node functions
-├── state.py              # AgentState TypedDict
-├── tools.py              # analysis_tool + execute_code_tool definitions
-├── complexity.py         # AST-based complexity analyzer
-├── prompts.py            # REFACTOR_SYSTEM_PROMPT, REFACTOR_SYSTEM_PROMPT2, COMPARATOR_PROMPT
-├── llms.py               # LLM instantiation (Groq + OpenRouter)
-├── code_to_analyze.py    # Drop your code here for CLI usage
-└── requirements.txt
+	Comparator -->|FAIL| Refactor
+	Comparator -->|PASS| Executer[executer]
+	Comparator -->|max iterations| FromPy["Translate from Python"]
+
+	Executer -->|FAIL| Refactor
+	Executer -->|PASS, non-python| FromPy
+	Executer -->|PASS, python| E6([END])
+
+	FromPy --> E7([END])
 ```
 
----
+### LLM agents (four)
+
+- **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input.
+- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its own output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of refactor directives. The verdict (`HALT_PERFECT_ENOUGH` vs proceed) is recomputed in code, never trusted from the model.
+- **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Comparator, or Executor flagged.
+- **Comparator Agent** — diffs the baseline Architect report against the latest one and returns PASS / FAIL.
+
+### Plain-function nodes (no LLM)
+
+- **detect_language** — regex scoring with positive/negative signals to pick Python / Java / C++ or mark input unsupported/unknown.
+- **analyzer** — calls `analysis_tool` directly. The first run is captured as the baseline report; afterwards it always routes to the Architect.
+- **syntax_check / syntax_check2** — `ast.parse()` on refactored code (and separately on translated code); loops back on failure, up to `max_iterations`.
+- **executer** — calls `execute_code_tool` to run the code in a Docker container.
+
+### Tools
+
+- `analysis_tool` — single merged tool: time & space complexity, SOLID violations (SRP / OCP / LSP / ISP / DIP), and a clean-code index.
+- `execute_code_tool` — runs code in a Docker container, auto-installing third-party imports via pip before execution.
+
+## Models
+
+| Node | Type | Model (default) | Provider | Temp |
+| --- | --- | --- | --- | --- |
+| Translator | LLM | `model3` (e.g. llama-3.3-70b-versatile) | Groq | 0.2 |
+| Architect | LLM | meta-llama/llama-4-scout-17b-16e-instruct | Groq | 0 |
+| Refactor | LLM | `model1` (e.g. openrouter/owl-alpha) | OpenRouter | 0.2 |
+| Comparator | LLM | `model2` (e.g. llama-4-scout-17b-16e-instruct) | Groq | 0.1 |
+| detect_language · analyzer · syntax_check · executer | Plain fn | — | — | — |
+
+## Project structure
+
+```
+code-analysis/
+├── frontend/                 # Vite + React 19 + TypeScript web app (port 3000)
+│   ├── App.tsx               # Root component; WebSocket client + GitHub OAuth callback
+│   ├── index.tsx / index.html
+│   ├── components/           # Dashboard, CodeEditor, Results, OptimizeReport,
+│   │                         # SolidReport, CleanCodeReport, Time/SpaceComplexityReport,
+│   │                         # RepoPicker, RepoAnalysis, HistorySidebar, LoginPage, ...
+│   ├── contexts/ThemeContext.tsx
+│   ├── types.ts
+│   ├── vite.config.ts        # dev server on port 3000
+│   └── package.json
+├── backend/
+│   ├── app/main.py           # FastAPI app: /ws/analyze, /history, /github/analyze-repo
+│   └── requirements.txt      # backend + AI deps (fastapi, motor, langgraph, docker, ...)
+├── ai_service/
+│   └── app/
+│       ├── agents/           # architect, comparator, refactor, translator (LLM agents)
+│       ├── graph/            # nodes.py, routers.py, workflow.py (build_graph), __init__
+│       ├── services/         # SRP/OCP/LSP/ISP/DIP detectors, clean_code, complexity, executer
+│       │   └── tests/        # calibration scripts (SRP / OCP / LSP / ISP / DIP)
+│       ├── tools/            # analysis_tool.py, execute_code_tool.py
+│       ├── prompts/          # architect / comparator / refactor / translator prompts
+│       ├── schemas/state.py  # AgentState TypedDict
+│       ├── helpers/config.py # pydantic-settings (reads .env)
+│       ├── llms.py           # Groq + OpenRouter LLM instantiation
+│       ├── app.py            # Standalone Streamlit UI
+│       ├── main.py           # Standalone CLI
+│       └── requirements.txt
+├── database/
+│   ├── auth.py               # GitHub OAuth + JWT + GitHub REST helpers (FastAPI router)
+│   ├── database.py           # MongoDB (Motor) client; db.users, db.history
+│   └── init.sql              # (empty — unused; the app uses MongoDB)
+├── data/                     # Datasets + notebooks used to calibrate the detectors
+├── documentation/            # Design docs (SOLID principle write-ups)
+├── main.py                   # ⚠️ Stale duplicate of backend/app/main.py (see Notes)
+├── dockercompose.yml         # (empty stub)
+├── .env.example
+└── LICENSE                   # Apache-2.0
+```
 
 ## Requirements
 
 - Python 3.11+
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (must be running)
-- A [Groq](https://console.groq.com) API key (free)
-- An [OpenRouter](https://openrouter.ai) API key (free)
-- A [LangSmith](https://smith.langchain.com) API key (free, for tracing)
+- Node.js 18+ (for the frontend)
+- MongoDB (local `mongodb://localhost:27017` or Atlas)
+- Docker Desktop (must be running — used by the code Executor)
+- A Groq API key and an OpenRouter API key
+- A GitHub OAuth App (for login + repo analysis)
+- A LangSmith API key (optional, for tracing)
 
----
-
-## Installation
-
-### 1. Clone the repository
+## Setup
 
 ```bash
-git clone https://github.com/yourusername/CodeGuard.git
-cd CodeGuard
+git clone https://github.com/mrieden/code-analysis.git
+cd code-analysis
 ```
 
-### 2. Create and activate a virtual environment
+### 1. Backend + AI service
 
 ```bash
 python -m venv venv
-
 # Windows
 venv\Scripts\activate
-
 # macOS / Linux
 source venv/bin/activate
+
+pip install -r backend/requirements.txt
 ```
 
-### 3. Install dependencies
+Create a `.env` in the repo root (loaded by both the AI settings and the backend):
 
 ```bash
-pip install -r requirements.txt
+# ── LLMs (required) ──
+GROQ_API_KEY=
+OPENROUTER_API_KEY=
+model1=openrouter/owl-alpha
+model2=meta-llama/llama-4-scout-17b-16e-instruct
+model3=llama-3.3-70b-versatile
+openai_api_base=https://openrouter.ai/api/v1
+max_iterations=3
+
+# ── LangSmith (optional) ──
+LANGSMITH_API_KEY=
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+LANGCHAIN_PROJECT=Astivora
+
+# ── Database ──
+MONGODB_URL=mongodb://localhost:27017
+DB_NAME=owlint
+
+# ── GitHub OAuth + JWT ──
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+JWT_SECRET=change-me-in-prod
+FRONTEND_URL=http://localhost:3000
 ```
 
----
+<aside>
+🔑
 
-## Environment Setup
+Create the GitHub OAuth App at GitHub → Settings → Developer settings → OAuth Apps. Set the Authorization callback URL to `http://localhost:8000/auth/github/callback`.
 
-Create a `.env` file in the project root:
+</aside>
+
+Run the API (from the repo root) on port 8000:
 
 ```bash
-touch .env   # macOS/Linux
-# or create it manually on Windows
+uvicorn backend.app.main:app --reload --port 8000
 ```
 
-Add the following keys:
+### 2. Frontend
 
-```env
-GROQ_API_KEY=your_groq_api_key_here
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-LANGSMITH_API_KEY=your_langsmith_api_key_here
+```bash
+cd frontend
+npm install
+npm run dev   # serves on http://localhost:3000
 ```
 
-| Key | Where to get it |
-|-----|----------------|
-| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) → API Keys |
-| `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
-| `LANGSMITH_API_KEY` | [smith.langchain.com](https://smith.langchain.com) → Settings → API Keys |
+The frontend talks to the backend at `ws://localhost:8000/ws/analyze` (live analysis) and the REST endpoints. Open http://localhost:3000 and sign in with GitHub.
 
----
-
-## Docker Setup
-
-CodeGuard executes refactored code inside an isolated Docker container for safety. Docker Desktop must be installed and **running** before you start CodeGuard.
-
-### 1. Install Docker Desktop
-
-Download and install from: https://www.docker.com/products/docker-desktop/
-
-### 2. Start Docker Desktop
-
-Open Docker Desktop and wait until the status shows **"Engine running"** in the bottom left.
-
-### 3. Pull the Python image
+### 3. Docker sandbox image (for the Executor)
 
 ```bash
 docker pull python:3.11-slim
 ```
 
-This is the sandboxed environment CodeGuard uses to run code. It only needs to be pulled once.
+## API surface (backend)
 
-### 4. Verify Docker is working
+| Method | Path | Description |
+| --- | --- | --- |
+| WS | `/ws/analyze` | Live static analysis on every keystroke; full agent pipeline on "Optimize" |
+| GET | `/history` | Logged-in user's analysis history |
+| DELETE | `/history/{entry_id}` | Delete a history entry |
+| POST | `/github/analyze-repo` | Static analysis across every Python file in a repo |
+| GET | `/auth/github/login` | Start GitHub OAuth |
+| GET | `/auth/github/callback` | OAuth callback → issues JWT → redirects to frontend |
+| GET | `/auth/me` | Current user |
+| GET | `/github/repos` · `/github/tree` · `/github/file` | Browse the user's GitHub repos/files |
+
+## Standalone AI service (optional)
+
+The `ai_service` can be run on its own without the web app:
 
 ```bash
-docker run --rm python:3.11-slim python --version
-```
+cd ai_service/app
+pip install -r requirements.txt
 
-You should see `Python 3.11.x`. If you get an error, make sure Docker Desktop is running.
-
-> **Sandbox constraints:** The container runs with no network access, a read-only filesystem, 128MB memory limit, and a 10-second timeout. It is automatically removed after each run.
-
----
-
-## Usage
-
-### Web UI (Streamlit)
-
-```bash
+# Streamlit UI
 streamlit run app.py
-```
 
-Open http://localhost:8501 in your browser. Paste your Python code or upload a `.py` file and click **Run Analysis**. Results stream live across four tabs: Analysis Report, Refactored Code, Comparator Report, and Execution Result.
-
-### CLI
-
-Paste your code into `code_to_analyze.py`, then run:
-
-```bash
+# CLI
 python main.py
 ```
 
-The final execution result will be printed to the terminal.
+## Sandbox security note
 
----
+The Executor runs refactored code in a Docker container with `cap_drop=["ALL"]`, `no-new-privileges`, a memory cap, a process limit, and a timeout. Dangerous calls/imports (`eval`, `exec`, `subprocess`, `socket`, ...) are hard-blocked by an AST check. Network access is enabled and the filesystem is writable so pip can install third-party imports at runtime, so do not treat it as a fully isolated sandbox for untrusted code.
 
-## Models
+## Notes / known gaps
 
-| Node | Type | Model | Provider |
-|------|------|-------|----------|
-| Analyzer | Plain function | — | — |
-| Refactor Agent | LLM | `poolside/laguna-m.1:free` | OpenRouter |
-| Syntax Check | Plain function | — | — |
-| Comparator Agent | LLM | `meta-llama/llama-4-scout-17b-16e-instruct` | Groq |
-| Executor | Plain function | — | — |
-
-> Both LLM nodes use `temperature=0`. The Comparator uses `max_retries=2`. All `.bind_tools()` calls use `parallel_tool_calls=False`.
-
----
+- **`/main.py` (repo root) is a stale duplicate** of `backend/app/main.py` with broken `sys.path` math and a missing `database/` path; running `python main.py` from the root will fail. Use `uvicorn backend.app.main:app`. Consider deleting the root copy.
+- **Docker stubs are empty:** `dockercompose.yml`, `backend/dockerfile`, `ai_service/dockerfile`, and `frontend/dockerfile` are all 0-byte placeholders — there is no working container orchestration yet.
+- **`database/init.sql` is empty and unused** (the app persists to MongoDB, not SQL).
+- The frontend's backend URLs (`localhost:8000`) and the backend's CORS/redirect origins (`localhost:3000`) are hard-coded; change them in code for non-local deployments.
 
 ## License
 
-MIT
+Apache-2.0
