@@ -8,8 +8,12 @@ interface AnalysisResult {
   total_violations: number;
   solid_report: Record<string, { status: string; reason: string; suggestion: string }>;
   clean_report: {
-    naming_quality?: { naming_score: number; issues: any[] };
-    radon?: { maintainability_index: number };
+    score?: number;
+    grade?: string;
+    passed?: boolean;
+    issues?: any[];
+    metrics?: { maintainability_index?: number; loc?: number; lloc?: number; comments?: number; cc_max?: number };
+    pylint?: any[];
   };
 }
 
@@ -97,12 +101,13 @@ const Dashboard: React.FC<DashboardProps> = ({
   onAnalyze, language, setLanguage, selectedModel, setSelectedModel,
 }) => {
   const { time_complexity, space_complexity, total_violations, solid_report, clean_report } = analysisResult;
-  const namingScore = clean_report?.naming_quality?.naming_score ?? 100;
-  const mi          = clean_report?.radon?.maintainability_index;
-  // Use maintainability index as the primary score if available (more accurate)
-  // MI is 0-100, naming score is also 0-100
-  const displayScore = mi !== undefined ? Math.round(Math.min(100, Math.max(0, mi))) : namingScore;
-  const scoreStatus  = displayScore >= 80 ? 'Pass' : displayScore >= 50 ? 'Warning' : 'Violation';
+  const cleanScore = clean_report?.score ?? 0;
+  const cleanGrade = clean_report?.grade ?? 'N/A';
+  const cleanIssues: any[] = clean_report?.issues || [];
+  const mi = clean_report?.metrics?.maintainability_index;
+  const displayScore = cleanScore;
+  const cleanIssueCount = cleanIssues.length;
+  const scoreStatus  = (clean_report?.passed) ? 'Pass' : cleanIssueCount > 0 ? 'Violation' : 'Warning';
 
   return (
     <div className="flex flex-col h-full py-4 gap-4">
@@ -117,15 +122,14 @@ const Dashboard: React.FC<DashboardProps> = ({
               : 'bg-green-500/10 border-green-500/30 text-green-400'}`}>
             {total_violations > 0 ? `${total_violations} violation${total_violations > 1 ? 's' : ''}` : 'All clear'}
           </span>
-          <select
-            value={language}
-            onChange={(e) => setLanguage(e.target.value as 'python' | 'java')}
-            className="bg-ui-panels border border-border-color rounded-lg px-3 py-1.5
-                       text-sm text-text-primary outline-none focus:ring-2 focus:ring-accent-primary"
+          <button
+            onClick={() => onNavigate(Page.RESULTS)}
+            className="px-4 py-1.5 rounded-lg bg-accent-primary
+                       text-white text-sm font-bold
+                       hover:opacity-90 transition-all shadow-sm"
           >
-            <option value="python">Python</option>
-            <option value="java">Java</option>
-          </select>
+            View Full Results
+          </button>
         </div>
       </div>
 
@@ -205,14 +209,46 @@ const Dashboard: React.FC<DashboardProps> = ({
           </div>
 
           {/* Clean Code card */}
-          <AnalysisCard
-            title="Clean Code"
-            value={`${displayScore}/100`}
-            sub={`Naming: ${namingScore}/100 · MI: ${mi !== undefined ? Math.round(mi) : 'N/A'}`}
-            status={scoreStatus}
+          <button
             onClick={() => onNavigate(Page.CLEAN_CODE_REPORT)}
-            valueClass={displayScore >= 80 ? 'text-green-400' : displayScore >= 50 ? 'text-yellow-400' : 'text-red-400'}
-          />
+            className={`w-full text-left p-4 rounded-xl border transition-all duration-200
+                       hover:scale-[1.02] hover:shadow-lg active:scale-[0.99]
+                       bg-ui-panels ${statusBg(scoreStatus)}`}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Clean Code</span>
+              <span className={`text-xs font-bold px-2 py-0.5 rounded-full border
+                ${scoreStatus === 'Pass'
+                  ? 'bg-green-500/10 border-green-500/30 text-green-400'
+                  : scoreStatus === 'Warning'
+                  ? 'bg-yellow-500/10 border-yellow-500/30 text-yellow-400'
+                  : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                {cleanIssueCount === 0 ? 'All Pass' : `${cleanIssueCount} Issues`}
+              </span>
+            </div>
+            <div className={`text-2xl font-mono font-bold ${displayScore >= 80 ? 'text-green-400' : displayScore >= 50 ? 'text-yellow-400' : 'text-red-400'}`}>
+              {displayScore}/100
+            </div>
+            <p className="text-xs text-text-secondary mt-1">
+              Grade: {cleanGrade} · MI: {mi !== undefined ? Math.round(mi) : 'N/A'}
+            </p>
+
+            {cleanIssueCount > 0 && (
+              <div className="mt-3 space-y-1">
+                {cleanIssues.slice(0, 2).map((issue: any, i: number) => (
+                  <p key={i} className="text-xs text-text-secondary truncate">
+                    <span className={`font-bold ${issue.sev === 'error' ? 'text-red-400' : issue.sev === 'warning' ? 'text-yellow-400' : 'text-text-secondary'}`}>
+                      {issue.sev === 'error' ? 'E' : issue.sev === 'warning' ? 'W' : 'H'}:
+                    </span>{' '}
+                    {issue.msg}
+                  </p>
+                ))}
+                {cleanIssueCount > 2 && (
+                  <p className="text-xs text-accent-primary">+{cleanIssueCount - 2} more →</p>
+                )}
+              </div>
+            )}
+          </button>
 
           {/* SOLID card */}
           <button

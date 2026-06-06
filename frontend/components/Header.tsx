@@ -30,9 +30,9 @@ const Header: React.FC<HeaderProps> = ({ onNavigate, onHistoryOpen, token, onLog
   className="flex items-center gap-2 hover:opacity-80 transition-opacity"
 >
   <img
-    src="/logo.png"
+    src={darkMode ? '/lightlogo.png' : '/darklogo.png'}
     alt="Strivora AI Logo"
-    className="h-20 w-20 mr-2"   // ⬅️ restored to old size
+    className="h-20 w-20 mr-2"
   />
   <div className="flex flex-col items-start">
     <GradientText as="h1" className="text-2xl font-bold tracking-wider">
@@ -54,8 +54,11 @@ const Header: React.FC<HeaderProps> = ({ onNavigate, onHistoryOpen, token, onLog
             <button
               key={label}
               onClick={() => onNavigate(page)}
-              className="px-3 py-1.5 rounded-lg text-sm text-text-secondary
-                         hover:text-text-primary hover:bg-accent-primary/10 transition-all"
+              className="relative px-4 py-2 rounded-lg text-sm font-medium text-text-secondary
+                         hover:text-text-primary hover:bg-accent-primary/10 transition-all
+                         after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2
+                         after:w-0 after:h-0.5 after:bg-accent-primary after:rounded-full
+                         after:transition-all hover:after:w-2/3"
             >
               {label}
             </button>
