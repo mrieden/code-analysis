@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+motor
+python-jose[cryptography]
+httpx
+pydantic-settings
+langchain
+langchain-core
+langchain-groq
+langchain-openai
+langgraph
+radon
+pylint
+docker
