@@ -10,8 +10,7 @@ TYPE_DISPATCH_NAMES = {
     "type", "kind", "action", "method", "mode", "variant",
     "category", "strategy", "op", "operation", "cmd", "command",
     "role", "shape", "tag", "event_type", "msg_type", "request_type",
-    "format", "protocol", "handler", "dispatch", "key", "name",
-    "status", "state", "flag", "subtype", "msg_kind", "cls",
+    "format", "protocol", "handler", "dispatch", "subtype", "msg_kind", "cls"
 }
 
 # Attribute access patterns that suggest type-dispatch
@@ -347,6 +346,80 @@ class OCPDetector(ast.NodeVisitor):
                                 "Push this logic inside the class as a method.")
                     return True
         return False
+    
+
+    def _check_hardcoded_filtering(self, node: ast.FunctionDef):
+        """
+        Catches missing Specification patterns: 
+        def find_something(self, query): return [x for x in items if x.a == query or x.b == query]
+        """
+        name_lower = node.name.lower()
+        if not any(name_lower.startswith(prefix) for prefix in ("find", "search", "filter")):
+            return
+
+        # Walk through the function to find Boolean Operations (or / and)
+        for child in ast.walk(node):
+            if isinstance(child, ast.BoolOp):
+                # Count how many attributes are being inspected in this single condition
+                attribute_checks = 0
+                for value in child.values:
+                    # Look for things like: query in book.title (ast.Compare)
+                    if isinstance(value, ast.Compare):
+                        for comp_part in [value.left] + value.comparators:
+                            # We are looking for attribute access chains (e.g., book.title.lower())
+                            chain = _attr_chain(comp_part)
+                            if "." in chain:
+                                attribute_checks += 1
+                
+                # If they are checking 2 or more attributes in a hardcoded OR/AND chain inside a search function
+                if attribute_checks >= 2:
+                    self._report(node, "Hardcoded Filtering (Missing Specification)", "medium",
+                                 f"Method '{node.name}' contains hardcoded attribute filtering. "
+                                 "Adding new search criteria requires modifying this method. "
+                                 "Consider using the Specification pattern instead.")
+                    return # Only report once per function
+                
+
+    def _check_method_routing(self, node: ast.ClassDef) -> bool:
+        """
+        Detects type-routing disguised as methods (e.g., pay_credit, pay_debit)
+        but ignores valid business actions (e.g., process_payment, process_refund).
+        """
+        # Tighter vocabulary: highly specific to data formats and strategies
+        DISPATCH_PREFIXES = {"pay", "parse", "export", "import", "render", "convert", "serialize"}
+        
+        method_signatures = {}
+        
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef) and not item.name.startswith("__"):
+                # Ignore abstract methods (interfaces define contracts, they don't violate OCP)
+                is_abstract = any(
+                    isinstance(dec, ast.Name) and dec.id == "abstractmethod"
+                    for dec in item.decorator_list
+                )
+                if is_abstract:
+                    continue
+                    
+                parts = item.name.split('_')
+                if len(parts) > 1:
+                    prefix = parts[0].lower()
+                    
+                    if prefix in DISPATCH_PREFIXES:
+                        # Extract exact argument names to form a signature tuple
+                        # e.g., ('self', 'order', 'security_code')
+                        args = tuple(arg.arg for arg in item.args.args)
+                        key = (prefix, args)
+                        method_signatures.setdefault(key, []).append(item.name)
+
+        # Flag if we see 2+ methods with the exact same prefix AND identical arguments
+        for (prefix, args), names in method_signatures.items():
+            if len(names) >= 2:
+                self._report(node, "Method Name Routing", "high",
+                             f"Class '{node.name}' has {len(names)} type-specific methods with identical signatures "
+                             f"({', '.join(names[:2])}...). This acts as a hardcoded switch statement. "
+                             "Use the Strategy pattern instead.")
+                return True
+        return False
 
     # ------------------------------------------------------------------ #
     # Assignment tracking — find variables that carry type info            #
@@ -383,17 +456,12 @@ class OCPDetector(ast.NodeVisitor):
     # visitors                                                             #
     # ------------------------------------------------------------------ #
 
-    def visit_ClassDef(self, node: ast.ClassDef):
-        prev = self.current_class
-        self.current_class = node.name
-        self.generic_visit(node)
-        self.current_class = prev
-
     def visit_FunctionDef(self, node: ast.FunctionDef):
             prev_fn = self.current_function
             self.current_function = node.name
 
             self._type_var_scopes.append(set())
+            self._check_hardcoded_filtering(node)
 
             self.generic_visit(node)
 
@@ -404,6 +472,27 @@ class OCPDetector(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign):
         self._track_type_assignment(node)
+
+        if isinstance(node.value, ast.Dict) and node.value.keys:
+            has_class_instantiation = False
+            for val in node.value.values:
+                if isinstance(val, ast.Call) and isinstance(val.func, ast.Name):
+                    if val.func.id[0].isupper() and val.func.id not in BUILTIN_TYPES:
+                        has_class_instantiation = True
+                        break
+            
+            if has_class_instantiation:
+                # Check if it is being assigned to an instance variable (self.something)
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                        if target.value.id == "self":
+                            self._report(node, "Hardcoded Registry", "medium",
+                                        f"Hardcoded dictionary mapping to class instances in 'self.{target.attr}'. "
+                                        "Adding a new strategy requires modifying this class. "
+                                        "Use Dependency Injection or a registration method instead.")
+                            break
+
+        # Always call generic_visit at the end
         self.generic_visit(node)
 
     def visit_If(self, node: ast.If):
@@ -416,6 +505,7 @@ class OCPDetector(ast.NodeVisitor):
             or self._check_callable_dispatch(node)
             or self._check_issubclass_dispatch(node)
             or self._check_string_startswith_type(node)
+            or self._check_property_inspection(node)
         )
 
         # Long elif chains are an OCP smell regardless of what they test
@@ -501,12 +591,13 @@ class OCPDetector(ast.NodeVisitor):
                 self._report(node, "Dict Subscript Attr Dispatch", "medium",
                             f"Dict indexed by .{sl.attr} attribute — consider polymorphism")
         self.generic_visit(node)
+
     def visit_ClassDef(self, node: ast.ClassDef):
         prev_class = self.current_class
         self.current_class = node.name
 
-        # --- NEW HEURISTIC: Method Name Routing ---
-        # Look for multiple methods sharing a dispatch prefix (e.g., pay_debit, pay_credit)
+        self._check_hardcoded_filtering(node)
+        self._type_var_scopes.append(set())
         method_prefixes = {}
         for item in node.body:
             if isinstance(item, ast.FunctionDef) and not item.name.startswith("__"):
