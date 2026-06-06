@@ -6,6 +6,8 @@ export enum Page {
   SPACE_COMPLEXITY_REPORT = 'SPACE_COMPLEXITY_REPORT',
   CLEAN_CODE_REPORT    = 'CLEAN_CODE_REPORT',
   OPTIMIZE_REPORT      = 'OPTIMIZE_REPORT',
+  REPO_ANALYSIS        = 'REPO_ANALYSIS',
+  TRENDS               = 'TRENDS',
   ABOUT                = 'ABOUT',
   HELP                 = 'HELP',
   LOGIN                = 'LOGIN',

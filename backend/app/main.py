@@ -30,7 +30,13 @@ from services import (
 from graph import build_graph
 
 # ── Auth & DB imports ─────────────────────────────────────────
-from auth import get_current_user, router as auth_router
+from auth import (
+    get_current_user,
+    router as auth_router,
+    _github_get,
+    _require_github_token,
+    GITHUB_API,
+)
 from database import db
 
 # ── LangChain ─────────────────────────────────────────────────
@@ -43,7 +49,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -292,6 +298,68 @@ async def delete_history_entry(entry_id: str, current_user: dict = Depends(get_c
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Entry not found")
     return {"message": "Deleted successfully"}
+
+
+@app.post("/github/analyze-repo")
+async def analyze_repo(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Run static analysis across every Python file in a GitHub repository."""
+    import base64
+
+    token  = _require_github_token(current_user)
+    owner  = payload.get("owner")
+    repo   = payload.get("repo")
+    branch = payload.get("branch")
+
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="owner and repo are required")
+
+    if not branch:
+        repo_info = await _github_get(token, f"{GITHUB_API}/repos/{owner}/{repo}")
+        branch = repo_info.get("default_branch", "main")
+
+    tree = await _github_get(
+        token,
+        f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/{branch}",
+        params={"recursive": "1"},
+    )
+    py_files = [
+        t["path"] for t in tree.get("tree", [])
+        if t.get("type") == "blob" and t["path"].endswith(".py")
+    ]
+
+    MAX_FILES = 40
+    truncated = len(py_files) > MAX_FILES
+    py_files  = py_files[:MAX_FILES]
+
+    files = []
+    for path in py_files:
+        try:
+            data = await _github_get(
+                token,
+                f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}",
+                params={"ref": branch},
+            )
+            if not (isinstance(data, dict) and data.get("encoding") == "base64"):
+                files.append({"path": path, "error": "unsupported encoding"})
+                continue
+            content  = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+            analysis = run_analysis_engine(content)
+            files.append({
+                "path": path,
+                "loc": content.count("\n") + 1,
+                "analysis": analysis,
+            })
+        except Exception as e:
+            files.append({"path": path, "error": str(e)})
+
+    return {
+        "owner": owner,
+        "repo": repo,
+        "branch": branch,
+        "total_python_files": len(py_files),
+        "truncated": truncated,
+        "files": files,
+    }
 
 
 # ─────────────────────────────────────────────────────────────

@@ -13,6 +13,8 @@ import CleanCodeReport from './components/CleanCodeReport';
 import OptimizeReport from './components/OptimizeReport';
 import HistorySidebar from './components/HistorySidebar';
 import LoginPage from './components/LoginPage';
+import RepoAnalysis from './components/RepoAnalysis';
+import Trends from './components/Trends';
 
 const App: React.FC = () => {
   const [currentPage, setCurrentPage]     = useState<Page>(Page.DASHBOARD);
@@ -159,6 +161,12 @@ const App: React.FC = () => {
     navigateTo(Page.OPTIMIZE_REPORT);
   };
 
+  const handleOpenInEditor = (content: string) => {
+    setCode(content);
+    debouncedSend(content);
+    navigateTo(Page.DASHBOARD);
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('owlint_token');
     setToken(null);
@@ -176,6 +184,7 @@ const App: React.FC = () => {
           <Dashboard
             onNavigate={navigateTo}
             code={code}
+            token={token}
             onCodeChange={handleCodeChange}
             analysisResult={analysisResult}
             language={language}
@@ -220,6 +229,18 @@ const App: React.FC = () => {
           />
         );
 
+      case Page.REPO_ANALYSIS:
+        return (
+          <RepoAnalysis
+            token={token}
+            onNavigate={navigateTo}
+            onOpenInEditor={handleOpenInEditor}
+          />
+        );
+
+      case Page.TRENDS:
+        return <Trends token={token} onNavigate={navigateTo} />;
+
       case Page.ABOUT:
         return <About onNavigate={navigateTo} />;
 
@@ -231,6 +252,7 @@ const App: React.FC = () => {
           <Dashboard
             onNavigate={navigateTo}
             code={code}
+            token={token}
             onCodeChange={handleCodeChange}
             analysisResult={analysisResult}
             language={language}
@@ -263,6 +285,7 @@ const App: React.FC = () => {
         isOpen={historyOpen}
         onClose={() => setHistoryOpen(false)}
         onLoadEntry={handleLoadHistoryEntry}
+        onViewTrends={() => { setHistoryOpen(false); navigateTo(Page.TRENDS); }}
         token={token}
       />
     </div>
