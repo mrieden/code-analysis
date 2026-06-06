@@ -1,17 +1,25 @@
 # 🛡️ CodeGuard
 
-> Multi-agent Python code analysis and automated refactoring powered by LangGraph.
-> 
+> Multi-agent Python code analysis and automated refactoring, exposed through a full-stack web app (React + FastAPI) and powered by LangGraph.
 
-## What is CodeGuard?
+CodeGuard takes raw code, detects its language, runs deterministic SOLID / complexity / clean-code analysis, then drives an agentic LangGraph pipeline that automatically refactors the code, validates it, and (for Python) executes it in a hardened Docker sandbox. Python is analyzed directly; Java and C++ are translated to Python, processed, then translated back.
 
-CodeGuard is an agentic pipeline that takes raw code, detects its language, analyzes it for quality issues, automatically refactors it, and validates the result — all without human intervention. Python is analyzed directly; Java and C++ are translated to Python, processed, then translated back.
+The project is a **monorepo** with four cooperating parts:
 
-## Architecture
+| Part | Path | Stack | Role |
+| --- | --- | --- | --- |
+| Frontend | `frontend/` | Vite + React 19 + TypeScript | Web UI (editor, live analysis, reports, history, GitHub repo analysis) |
+| Backend API | `backend/` | FastAPI + Uvicorn | WebSocket + REST API, GitHub OAuth, history persistence |
+| AI service | `ai_service/` | LangGraph + LangChain | The multi-agent analysis/refactor pipeline, plus a standalone Streamlit UI and CLI |
+| Database / Auth | `database/` | MongoDB (Motor) + JWT | GitHub OAuth, user records, analysis history |
 
-CodeGuard is built on **LangGraph**. The pipeline is composed of **four LLM agents** and several deterministic plain-function nodes wired together as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
+> The backend imports the analysis engine and agent graph directly from `ai_service/app` via `sys.path`, so the two services run in one Python process.
 
-```mermaid
+## Architecture (AI pipeline)
+
+The pipeline is composed of **four LLM agents** and several deterministic plain-function nodes wired together as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
+
+\`\`\`mermaid
 flowchart TD
     Start([Input code]) --> Detect["Detect Language (plain fn)"]
     Detect -->|unsupported / unknown| End1([END])
@@ -34,187 +42,205 @@ flowchart TD
     Exec -->|PASS, non-python| FromPy
     Exec -->|PASS, python| End3([END])
     FromPy --> End4([END])
-```
+\`\`\`
 
 ### LLM agents (four)
 
 - **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input.
-- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its own output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of **refactor directives**. The global verdict (`PROCEED_TO_REFACTOR` vs `HALT_PERFECT_ENOUGH`) is recomputed in code, never trusted from the model.
+- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its own output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of **refactor directives**. The global verdict (\`PROCEED_TO_REFACTOR\` vs \`HALT_PERFECT_ENOUGH\`) is recomputed in code, never trusted from the model.
 - **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Comparator, or Executor flagged.
 - **Comparator Agent** — diffs the baseline Architect report against the latest one and returns PASS / FAIL.
 
 ### Plain-function nodes (no LLM)
 
 - **Detect Language** — regex scoring with positive/negative signals to pick Python / Java / C++ or mark input unsupported/unknown.
-- **Analyzer** — calls `analysis_tool` directly. The first run is captured as the baseline report.
-- **Syntax Check** — `ast.parse()` on refactored (and separately on translated) code; loops back on failure.
-- **Executor** — calls `execute_code_tool` to run the code in a Docker container.
+- **Analyzer** — calls \`analysis_tool\` directly. The first run is captured as the baseline report.
+- **Syntax Check** — \`ast.parse()\` on refactored (and separately on translated) code; loops back on failure.
+- **Executor** — calls \`execute_code_tool\` to run the code in a Docker container.
 
 ### Tools
 
-- `analysis_tool` — single merged tool: time & space complexity, SOLID violations (SRP / OCP / LSP / ISP / DIP), and a clean-code index.
-- `execute_code_tool` — runs code in a Docker container, auto-installing third-party imports via pip before execution.
+- \`analysis_tool\` — single merged tool: time & space complexity, SOLID violations (SRP / OCP / LSP / ISP / DIP), and a clean-code index.
+- \`execute_code_tool\` — runs code in a Docker container, auto-installing third-party imports via pip before execution.
 
 ## Models
 
 | Node | Type | Model (default) | Provider | Temp |
 | --- | --- | --- | --- | --- |
 | Detect Language | Plain fn | — | — | — |
-| Translator | LLM | `model3` (e.g. `llama-3.3-70b-versatile`) | Groq | 0.2 |
+| Translator | LLM | \`model3\` (e.g. \`llama-3.3-70b-versatile\`) | Groq | 0.2 |
 | Analyzer | Plain fn | — | — | — |
-| Architect | LLM | `meta-llama/llama-4-scout-17b-16e-instruct` | Groq | 0 |
-| Refactor | LLM | `model1` (e.g. `openrouter/owl-alpha`) | OpenRouter | 0.2 |
+| Architect | LLM | \`meta-llama/llama-4-scout-17b-16e-instruct\` | Groq | 0 |
+| Refactor | LLM | \`model1\` (e.g. \`openrouter/owl-alpha\`) | OpenRouter | 0.2 |
 | Syntax Check | Plain fn | — | — | — |
-| Comparator | LLM | `model2` (e.g. `llama-4-scout-17b-16e-instruct`) | Groq | 0.1 |
+| Comparator | LLM | \`model2\` (e.g. \`llama-4-scout-17b-16e-instruct\`) | Groq | 0.1 |
 | Executor | Plain fn | — | — | — |
 
 ## Project Structure
 
-```
-CodeGuard/
-├── app/
-│   ├── agents/
-│   │   ├── architect.py        # Architect Agent (LLM)
-│   │   ├── comparator.py       # Comparator Agent (LLM)
-│   │   ├── refactor.py         # Refactor Agent (LLM)
-│   │   └── translator.py       # Translator Agent (LLM)
-│   ├── graph/
-│   │   ├── __init__.py         # exposes build_graph
-│   │   ├── nodes.py            # plain-function nodes + language detection
-│   │   ├── routers.py          # conditional-edge routing logic
-│   │   └── workflow.py         # StateGraph wiring (build_graph)
-│   ├── helpers/
-│   │   └── config.py           # pydantic-settings
-│   ├── prompts/
-│   │   ├── architect_prompt.py
-│   │   ├── comparator_prompt.py
-│   │   ├── refactor_prompt.py
-│   │   └── translator_prompt.py
-│   ├── schemas/
-│   │   └── state.py            # AgentState TypedDict
-│   ├── services/
-│   │   ├── SRP_Detection_Final.py
-│   │   ├── OCP_Detection_Final.py
-│   │   ├── Liskov_Substitution_Principle.py
-│   │   ├── ISP_detect.py
-│   │   ├── dependancy_principle.py
-│   │   ├── clean_code.py
-│   │   ├── complexity.py
-│   │   ├── executer.py         # Docker sandbox runner
-│   │   └── tests/              # calibration scripts (SRP / LSP / DIP)
-│   ├── tools/
-│   │   ├── analysis_tool.py
-│   │   └── execute_code_tool.py
-│   ├── app.py                  # Streamlit web UI
-│   ├── main.py                 # CLI entry point
-│   ├── llms.py                 # LLM instantiation (Groq + OpenRouter)
-│   ├── requirements.txt
-│   └── .env.example
-├── LICENSE
-└── README.md
-```
+\`\`\`
+code-analysis/
+├── frontend/                 # Vite + React 19 + TypeScript web app (port 3000)
+│   ├── App.tsx               # Root component; WebSocket client + GitHub OAuth callback
+│   ├── index.tsx / index.html
+│   ├── components/           # Dashboard, CodeEditor, Results, OptimizeReport,
+│   │                         # SolidReport, CleanCodeReport, Time/SpaceComplexityReport,
+│   │                         # RepoPicker, RepoAnalysis, HistorySidebar, LoginPage, ...
+│   ├── contexts/ThemeContext.tsx
+│   ├── types.ts
+│   ├── vite.config.ts        # dev server on port 3000
+│   └── package.json
+├── backend/
+│   ├── app/main.py           # FastAPI app: /ws/analyze, /history, /github/analyze-repo
+│   └── requirements.txt      # backend + AI deps (fastapi, motor, langgraph, docker, ...)
+├── ai_service/
+│   └── app/
+│       ├── agents/           # architect, comparator, refactor, translator (LLM agents)
+│       ├── graph/            # nodes.py, routers.py, workflow.py (build_graph), __init__
+│       ├── services/         # SRP/OCP/LSP/ISP/DIP detectors, clean_code, complexity, executer
+│       │   └── tests/        # calibration scripts (SRP / OCP / LSP / ISP / DIP)
+│       ├── tools/            # analysis_tool.py, execute_code_tool.py
+│       ├── prompts/          # architect / comparator / refactor / translator prompts
+│       ├── schemas/state.py  # AgentState TypedDict
+│       ├── helpers/config.py # pydantic-settings (reads .env)
+│       ├── llms.py           # Groq + OpenRouter LLM instantiation
+│       ├── app.py            # Standalone Streamlit UI
+│       ├── main.py           # Standalone CLI (--file / --stdin)
+│       └── requirements.txt
+├── database/
+│   ├── auth.py               # GitHub OAuth + JWT + GitHub REST helpers (FastAPI router)
+│   ├── database.py           # MongoDB (Motor) client; db.users, db.history
+│   └── init.sql              # (empty — unused; the app uses MongoDB)
+├── data/                     # Datasets + notebooks used to calibrate the detectors
+├── documentation/            # Design docs (SOLID principle write-ups)
+├── main.py                   # ⚠️ Stale duplicate of backend/app/main.py (see Notes)
+├── dockercompose.yml         # (empty stub)
+├── .env.example
+└── LICENSE                   # Apache-2.0
+\`\`\`
 
 ## Requirements
 
 - Python 3.11+
-- Docker Desktop (must be running)
-- A Groq API key (free)
-- An OpenRouter API key (free)
+- Node.js 18+ (for the frontend)
+- MongoDB (local \`mongodb://localhost:27017\` or Atlas)
+- Docker Desktop (must be running — used by the code Executor)
+- A Groq API key (free) and an OpenRouter API key (free)
+- A GitHub OAuth App (for login + repo analysis)
 - A LangSmith API key (optional, for tracing)
 
-## Installation
+## Setup
 
-```bash
-git clone https://github.com/AbdallahSabry7/CodeGuard.git
-cd CodeGuard/app
+\`\`\`bash
+git clone https://github.com/mrieden/code-analysis.git
+cd code-analysis
+\`\`\`
 
+### 1. Backend + AI service
+
+\`\`\`bash
 python -m venv venv
 # Windows
-venv\Scripts\activate
+venv\\Scripts\\activate
 # macOS / Linux
 source venv/bin/activate
 
-pip install -r requirements.txt
-```
+pip install -r backend/requirements.txt
+\`\`\`
 
-## Environment Setup
+Create a \`.env\` in the repo root (loaded by both the AI settings and the backend):
 
-Copy the example env file (in `app/`) and fill in your keys:
-
-```bash
-cp .env.example .env
-```
-
-```bash
+\`\`\`bash
+# ── LLMs (required) ──
 GROQ_API_KEY=
 OPENROUTER_API_KEY=
+model1=openrouter/owl-alpha
+model2=meta-llama/llama-4-scout-17b-16e-instruct
+model3=llama-3.3-70b-versatile
+openai_api_base=https://openrouter.ai/api/v1
+max_iterations=3
+
+# ── LangSmith (optional) ──
 LANGSMITH_API_KEY=
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
 LANGCHAIN_PROJECT=CodeGuard
 
-model1=openrouter/owl-alpha
-model2=meta-llama/llama-4-scout-17b-16e-instruct
-model3=llama-3.3-70b-versatile
-openai_api_base=https://openrouter.ai/api/v1
+# ── Database ──
+MONGODB_URL=mongodb://localhost:27017
+DB_NAME=owlint
 
-max_iterations=3
-```
+# ── GitHub OAuth + JWT ──
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+JWT_SECRET=change-me-in-prod
+FRONTEND_URL=http://localhost:3000
+\`\`\`
 
-| Key | Where to get it |
-| --- | --- |
-| `GROQ_API_KEY` | console.groq.com → API Keys |
-| `OPENROUTER_API_KEY` | openrouter.ai/keys |
-| `LANGSMITH_API_KEY` | smith.langchain.com → Settings → API Keys |
+> Create the GitHub OAuth App at GitHub → Settings → Developer settings → OAuth Apps.
+> Set the **Authorization callback URL** to \`http://localhost:8000/auth/github/callback\`.
 
-## Docker Setup
+Run the API (from the repo root) on port 8000:
 
-CodeGuard executes refactored code inside a Docker container. Docker Desktop must be installed and **running** before you start CodeGuard.
+\`\`\`bash
+uvicorn backend.app.main:app --reload --port 8000
+\`\`\`
 
-```bash
+### 2. Frontend
+
+\`\`\`bash
+cd frontend
+npm install
+npm run dev   # serves on http://localhost:3000
+\`\`\`
+
+The frontend talks to the backend at \`ws://localhost:8000/ws/analyze\` (live analysis) and the REST endpoints. Open http://localhost:3000 and sign in with GitHub.
+
+### 3. Docker sandbox image (for the Executor)
+
+\`\`\`bash
 docker pull python:3.11-slim
-docker run --rm python:3.11-slim python --version   # should print Python 3.11.x
-```
+\`\`\`
 
-<aside>
-⚠️
+## API surface (backend)
 
-**Security note — the sandbox is hardened but not network-isolated.** The Executor runs with `cap_drop=["ALL"]`, `no-new-privileges`, a 128 MB memory cap, a 64-process limit, and a 60-second timeout. However, **network access is enabled** and the **filesystem is writable**, because the Executor auto-installs third-party imports with `pip` at runtime. Dangerous calls/imports (`eval`, `exec`, `subprocess`, `socket`, etc.) are hard-blocked by an AST check; sandbox-incompatible but harmless patterns (`os`, `sys`, `open`, ...) are reported as PASS with a note. Do not treat this as a fully isolated sandbox for untrusted code.
+| Method | Path | Description |
+| --- | --- | --- |
+| WS | \`/ws/analyze\` | Live static analysis on every keystroke; full agent pipeline on "Optimize" |
+| GET | \`/history\` | Logged-in user's analysis history |
+| DELETE | \`/history/{entry_id}\` | Delete a history entry |
+| POST | \`/github/analyze-repo\` | Static analysis across every Python file in a repo |
+| GET | \`/auth/github/login\` | Start GitHub OAuth |
+| GET | \`/auth/github/callback\` | OAuth callback → issues JWT → redirects to frontend |
+| GET | \`/auth/me\` | Current user |
+| GET | \`/github/repos\` · \`/github/tree\` · \`/github/file\` | Browse the user's GitHub repos/files |
 
-</aside>
+## Standalone AI service (optional)
 
-### Sandbox constraints (actual)
+The \`ai_service\` can be run on its own without the web app:
 
-| Constraint | Value |
-| --- | --- |
-| Base image | `python:3.11-slim` |
-| Timeout | 60 seconds |
-| Memory limit | 128 MB |
-| CPU quota | 50000 |
-| PID limit | 64 |
-| Network | Enabled (for pip install) |
-| Filesystem | Writable |
-| Capabilities | `cap_drop=ALL`, `cap_add=[SETUID, SETGID]`, `no-new-privileges` |
-| Output cap | 4000 chars (stdout/stderr each) |
+\`\`\`bash
+cd ai_service/app
+pip install -r requirements.txt
 
-## Usage
-
-Run commands from inside the `app/` directory.
-
-### Web UI (Streamlit)
-
-```bash
+# Streamlit UI
 streamlit run app.py
-```
 
-Open the local URL Streamlit prints. Paste Python (or Java/C++) code and run the analysis; results stream across the report, refactored-code, comparator, and execution views.
-
-### CLI
-
-```bash
+# CLI
 python main.py --file path/to/your_code.py
 cat your_code.py | python main.py --stdin
-```
+\`\`\`
+
+## Sandbox security note
+
+The Executor runs refactored code in a Docker container with \`cap_drop=["ALL"]\`, \`no-new-privileges\`, a 128 MB memory cap, a 64-process limit, and a 60-second timeout. Dangerous calls/imports (\`eval\`, \`exec\`, \`subprocess\`, \`socket\`, ...) are hard-blocked by an AST check. **Network access is enabled and the filesystem is writable** (so pip can install third-party imports at runtime), so do not treat it as a fully isolated sandbox for untrusted code.
+
+## Notes / known gaps
+
+- **`/main.py` (repo root) is a stale duplicate** of `backend/app/main.py` with broken `sys.path` math and a missing `database/` path; running `python main.py` from the root will fail. Use `uvicorn backend.app.main:app`. Consider deleting the root copy.
+- **Docker stubs are empty:** `dockercompose.yml`, `backend/dockerfile`, `ai_service/dockerfile`, and `frontend/dockerfile` are all 0-byte placeholders — there is no working container orchestration yet.
+- **`database/init.sql` is empty and unused** (the app persists to MongoDB, not SQL).
+- The frontend's backend URLs (`localhost:8000`) and the backend's CORS/redirect origins (`localhost:3000`) are hard-coded; change them in code for non-local deployments.
 
 ## License
 
