@@ -1,84 +1,96 @@
-# 🛡️ CodeGuard
-
 > Multi-agent Python code analysis and automated refactoring, exposed through a full-stack web app (React + FastAPI) and powered by LangGraph.
+> 
 
-CodeGuard takes raw code, detects its language, runs deterministic SOLID / complexity / clean-code analysis, then drives an agentic LangGraph pipeline that automatically refactors the code, validates it, and (for Python) executes it in a hardened Docker sandbox. Python is analyzed directly; Java and C++ are translated to Python, processed, then translated back.
+Astivora takes raw code, detects its language, runs deterministic SOLID / complexity / clean-code analysis, then drives an agentic LangGraph pipeline that automatically refactors the code, validates it, and (for Python) executes it in a hardened Docker sandbox. Python is analyzed directly; Java and C++ are translated to Python, processed, then translated back.
 
 The project is a **monorepo** with four cooperating parts:
 
 | Part | Path | Stack | Role |
 | --- | --- | --- | --- |
-| Frontend | `frontend/` | Vite + React 19 + TypeScript | Web UI (editor, live analysis, reports, history, GitHub repo analysis) |
+| Frontend | `frontend/` | Vite + React 19 + TypeScript | Web UI: editor, live analysis, reports, history, GitHub repo analysis |
 | Backend API | `backend/` | FastAPI + Uvicorn | WebSocket + REST API, GitHub OAuth, history persistence |
 | AI service | `ai_service/` | LangGraph + LangChain | The multi-agent analysis/refactor pipeline, plus a standalone Streamlit UI and CLI |
 | Database / Auth | `database/` | MongoDB (Motor) + JWT | GitHub OAuth, user records, analysis history |
 
-> The backend imports the analysis engine and agent graph directly from `ai_service/app` via `sys.path`, so the two services run in one Python process.
+<aside>
+🔗
+
+The backend imports the analysis engine and agent graph directly from `ai_service/app` via `sys.path`, so the two services run in one Python process.
+
+</aside>
 
 ## Architecture (AI pipeline)
 
-The pipeline is composed of **four LLM agents** and several deterministic plain-function nodes wired together as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
+The pipeline wires **four LLM agents** together with several deterministic (non-LLM) nodes as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
 
-\`\`\`mermaid
+```mermaid
 flowchart TD
-    Start([Input code]) --> Detect["Detect Language (plain fn)"]
-    Detect -->|unsupported / unknown| End1([END])
-    Detect -->|python| Analyze["Analyzer (analysis_tool)"]
-    Detect -->|java / cpp| ToPy["Translate to Python (LLM)"]
-    ToPy --> SynT["Syntax Check - translation (ast.parse)"]
-    SynT -->|fix| ToPy
-    SynT -->|proceed| Analyze
-    Analyze --> Arch["Architect Agent (LLM)"]
-    Arch -->|HALT_PERFECT_ENOUGH| End2([END])
-    Arch -->|directives| Refactor["Refactor Agent (LLM)"]
-    Arch -->|re-entry| Compare["Comparator Agent (LLM)"]
-    Refactor --> Syn["Syntax Check (ast.parse)"]
-    Syn -->|fix| Refactor
-    Syn -->|proceed| Analyze
-    Compare -->|FAIL| Refactor
-    Compare -->|PASS| Exec["Executor (Docker sandbox)"]
-    Compare -->|done, non-python| FromPy["Translate from Python (LLM)"]
-    Exec -->|FAIL| Refactor
-    Exec -->|PASS, non-python| FromPy
-    Exec -->|PASS, python| End3([END])
-    FromPy --> End4([END])
-\`\`\`
+	Start([START]) --> Detect[detect_language]
+
+	Detect -->|unsupported / unknown| E1([END])
+	Detect -->|python| Analyzer[analyzer]
+	Detect -->|java / cpp| ToPy["Translate to Python"]
+
+	ToPy -->|first pass| Syn2[syntax_check2]
+	ToPy -->|re-entry| E2([END])
+	Syn2 -->|fix| ToPy
+	Syn2 -->|proceed| Analyzer
+	Syn2 -->|max iterations| E3([END])
+
+	Analyzer --> Architect[architect]
+
+	Architect -->|HALT_PERFECT_ENOUGH| E4([END])
+	Architect -->|no refactor yet| Refactor["Refactor Agent"]
+	Architect -->|already refactored| Comparator["Comparator Agent"]
+
+	Refactor --> Syn[syntax_check]
+	Syn -->|fix| Refactor
+	Syn -->|proceed| Analyzer
+	Syn -->|max iterations| E5([END])
+
+	Comparator -->|FAIL| Refactor
+	Comparator -->|PASS| Executer[executer]
+	Comparator -->|max iterations| FromPy["Translate from Python"]
+
+	Executer -->|FAIL| Refactor
+	Executer -->|PASS, non-python| FromPy
+	Executer -->|PASS, python| E6([END])
+
+	FromPy --> E7([END])
+```
 
 ### LLM agents (four)
 
 - **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input.
-- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its own output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of **refactor directives**. The global verdict (\`PROCEED_TO_REFACTOR\` vs \`HALT_PERFECT_ENOUGH\`) is recomputed in code, never trusted from the model.
+- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its own output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of refactor directives. The verdict (`HALT_PERFECT_ENOUGH` vs proceed) is recomputed in code, never trusted from the model.
 - **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Comparator, or Executor flagged.
 - **Comparator Agent** — diffs the baseline Architect report against the latest one and returns PASS / FAIL.
 
 ### Plain-function nodes (no LLM)
 
-- **Detect Language** — regex scoring with positive/negative signals to pick Python / Java / C++ or mark input unsupported/unknown.
-- **Analyzer** — calls \`analysis_tool\` directly. The first run is captured as the baseline report.
-- **Syntax Check** — \`ast.parse()\` on refactored (and separately on translated) code; loops back on failure.
-- **Executor** — calls \`execute_code_tool\` to run the code in a Docker container.
+- **detect_language** — regex scoring with positive/negative signals to pick Python / Java / C++ or mark input unsupported/unknown.
+- **analyzer** — calls `analysis_tool` directly. The first run is captured as the baseline report; afterwards it always routes to the Architect.
+- **syntax_check / syntax_check2** — `ast.parse()` on refactored code (and separately on translated code); loops back on failure, up to `max_iterations`.
+- **executer** — calls `execute_code_tool` to run the code in a Docker container.
 
 ### Tools
 
-- \`analysis_tool\` — single merged tool: time & space complexity, SOLID violations (SRP / OCP / LSP / ISP / DIP), and a clean-code index.
-- \`execute_code_tool\` — runs code in a Docker container, auto-installing third-party imports via pip before execution.
+- `analysis_tool` — single merged tool: time & space complexity, SOLID violations (SRP / OCP / LSP / ISP / DIP), and a clean-code index.
+- `execute_code_tool` — runs code in a Docker container, auto-installing third-party imports via pip before execution.
 
 ## Models
 
 | Node | Type | Model (default) | Provider | Temp |
 | --- | --- | --- | --- | --- |
-| Detect Language | Plain fn | — | — | — |
-| Translator | LLM | \`model3\` (e.g. \`llama-3.3-70b-versatile\`) | Groq | 0.2 |
-| Analyzer | Plain fn | — | — | — |
-| Architect | LLM | \`meta-llama/llama-4-scout-17b-16e-instruct\` | Groq | 0 |
-| Refactor | LLM | \`model1\` (e.g. \`openrouter/owl-alpha\`) | OpenRouter | 0.2 |
-| Syntax Check | Plain fn | — | — | — |
-| Comparator | LLM | \`model2\` (e.g. \`llama-4-scout-17b-16e-instruct\`) | Groq | 0.1 |
-| Executor | Plain fn | — | — | — |
+| Translator | LLM | `model3` (e.g. llama-3.3-70b-versatile) | Groq | 0.2 |
+| Architect | LLM | meta-llama/llama-4-scout-17b-16e-instruct | Groq | 0 |
+| Refactor | LLM | `model1` (e.g. openrouter/owl-alpha) | OpenRouter | 0.2 |
+| Comparator | LLM | `model2` (e.g. llama-4-scout-17b-16e-instruct) | Groq | 0.1 |
+| detect_language · analyzer · syntax_check · executer | Plain fn | — | — | — |
 
-## Project Structure
+## Project structure
 
-\`\`\`
+```
 code-analysis/
 ├── frontend/                 # Vite + React 19 + TypeScript web app (port 3000)
 │   ├── App.tsx               # Root component; WebSocket client + GitHub OAuth callback
@@ -105,7 +117,7 @@ code-analysis/
 │       ├── helpers/config.py # pydantic-settings (reads .env)
 │       ├── llms.py           # Groq + OpenRouter LLM instantiation
 │       ├── app.py            # Standalone Streamlit UI
-│       ├── main.py           # Standalone CLI (--file / --stdin)
+│       ├── main.py           # Standalone CLI
 │       └── requirements.txt
 ├── database/
 │   ├── auth.py               # GitHub OAuth + JWT + GitHub REST helpers (FastAPI router)
@@ -117,40 +129,40 @@ code-analysis/
 ├── dockercompose.yml         # (empty stub)
 ├── .env.example
 └── LICENSE                   # Apache-2.0
-\`\`\`
+```
 
 ## Requirements
 
 - Python 3.11+
 - Node.js 18+ (for the frontend)
-- MongoDB (local \`mongodb://localhost:27017\` or Atlas)
+- MongoDB (local `mongodb://localhost:27017` or Atlas)
 - Docker Desktop (must be running — used by the code Executor)
-- A Groq API key (free) and an OpenRouter API key (free)
+- A Groq API key and an OpenRouter API key
 - A GitHub OAuth App (for login + repo analysis)
 - A LangSmith API key (optional, for tracing)
 
 ## Setup
 
-\`\`\`bash
+```bash
 git clone https://github.com/mrieden/code-analysis.git
 cd code-analysis
-\`\`\`
+```
 
 ### 1. Backend + AI service
 
-\`\`\`bash
+```bash
 python -m venv venv
 # Windows
-venv\\Scripts\\activate
+venv\Scripts\activate
 # macOS / Linux
 source venv/bin/activate
 
 pip install -r backend/requirements.txt
-\`\`\`
+```
 
-Create a \`.env\` in the repo root (loaded by both the AI settings and the backend):
+Create a `.env` in the repo root (loaded by both the AI settings and the backend):
 
-\`\`\`bash
+```bash
 # ── LLMs (required) ──
 GROQ_API_KEY=
 OPENROUTER_API_KEY=
@@ -164,7 +176,7 @@ max_iterations=3
 LANGSMITH_API_KEY=
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
-LANGCHAIN_PROJECT=CodeGuard
+LANGCHAIN_PROJECT=Astivora
 
 # ── Database ──
 MONGODB_URL=mongodb://localhost:27017
@@ -175,51 +187,55 @@ GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 JWT_SECRET=change-me-in-prod
 FRONTEND_URL=http://localhost:3000
-\`\`\`
+```
 
-> Create the GitHub OAuth App at GitHub → Settings → Developer settings → OAuth Apps.
-> Set the **Authorization callback URL** to \`http://localhost:8000/auth/github/callback\`.
+<aside>
+🔑
+
+Create the GitHub OAuth App at GitHub → Settings → Developer settings → OAuth Apps. Set the Authorization callback URL to `http://localhost:8000/auth/github/callback`.
+
+</aside>
 
 Run the API (from the repo root) on port 8000:
 
-\`\`\`bash
+```bash
 uvicorn backend.app.main:app --reload --port 8000
-\`\`\`
+```
 
 ### 2. Frontend
 
-\`\`\`bash
+```bash
 cd frontend
 npm install
 npm run dev   # serves on http://localhost:3000
-\`\`\`
+```
 
-The frontend talks to the backend at \`ws://localhost:8000/ws/analyze\` (live analysis) and the REST endpoints. Open http://localhost:3000 and sign in with GitHub.
+The frontend talks to the backend at `ws://localhost:8000/ws/analyze` (live analysis) and the REST endpoints. Open http://localhost:3000 and sign in with GitHub.
 
 ### 3. Docker sandbox image (for the Executor)
 
-\`\`\`bash
+```bash
 docker pull python:3.11-slim
-\`\`\`
+```
 
 ## API surface (backend)
 
 | Method | Path | Description |
 | --- | --- | --- |
-| WS | \`/ws/analyze\` | Live static analysis on every keystroke; full agent pipeline on "Optimize" |
-| GET | \`/history\` | Logged-in user's analysis history |
-| DELETE | \`/history/{entry_id}\` | Delete a history entry |
-| POST | \`/github/analyze-repo\` | Static analysis across every Python file in a repo |
-| GET | \`/auth/github/login\` | Start GitHub OAuth |
-| GET | \`/auth/github/callback\` | OAuth callback → issues JWT → redirects to frontend |
-| GET | \`/auth/me\` | Current user |
-| GET | \`/github/repos\` · \`/github/tree\` · \`/github/file\` | Browse the user's GitHub repos/files |
+| WS | `/ws/analyze` | Live static analysis on every keystroke; full agent pipeline on "Optimize" |
+| GET | `/history` | Logged-in user's analysis history |
+| DELETE | `/history/{entry_id}` | Delete a history entry |
+| POST | `/github/analyze-repo` | Static analysis across every Python file in a repo |
+| GET | `/auth/github/login` | Start GitHub OAuth |
+| GET | `/auth/github/callback` | OAuth callback → issues JWT → redirects to frontend |
+| GET | `/auth/me` | Current user |
+| GET | `/github/repos` · `/github/tree` · `/github/file` | Browse the user's GitHub repos/files |
 
 ## Standalone AI service (optional)
 
-The \`ai_service\` can be run on its own without the web app:
+The `ai_service` can be run on its own without the web app:
 
-\`\`\`bash
+```bash
 cd ai_service/app
 pip install -r requirements.txt
 
@@ -227,13 +243,12 @@ pip install -r requirements.txt
 streamlit run app.py
 
 # CLI
-python main.py --file path/to/your_code.py
-cat your_code.py | python main.py --stdin
-\`\`\`
+python main.py
+```
 
 ## Sandbox security note
 
-The Executor runs refactored code in a Docker container with \`cap_drop=["ALL"]\`, \`no-new-privileges\`, a 128 MB memory cap, a 64-process limit, and a 60-second timeout. Dangerous calls/imports (\`eval\`, \`exec\`, \`subprocess\`, \`socket\`, ...) are hard-blocked by an AST check. **Network access is enabled and the filesystem is writable** (so pip can install third-party imports at runtime), so do not treat it as a fully isolated sandbox for untrusted code.
+The Executor runs refactored code in a Docker container with `cap_drop=["ALL"]`, `no-new-privileges`, a memory cap, a process limit, and a timeout. Dangerous calls/imports (`eval`, `exec`, `subprocess`, `socket`, ...) are hard-blocked by an AST check. Network access is enabled and the filesystem is writable so pip can install third-party imports at runtime, so do not treat it as a fully isolated sandbox for untrusted code.
 
 ## Notes / known gaps
 
