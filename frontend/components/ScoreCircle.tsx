@@ -6,6 +6,7 @@ import { useTheme } from '../contexts/ThemeContext';
 interface ScoreCircleProps {
   score: number;
   maxScore?: number;
+  variant?: 'default' | 'green';
 }
 
 const gradientColors = {
@@ -16,12 +17,18 @@ const gradientColors = {
   light: {
     stop1: '#3B82F6',
     stop2: '#A78BFA',
+  },
+  green: {
+    stop1: '#10b981',
+    stop2: '#34d399',
   }
 }
 
-const ScoreCircle: React.FC<ScoreCircleProps> = ({ score, maxScore = 100 }) => {
+const ScoreCircle: React.FC<ScoreCircleProps> = ({ score, maxScore = 100, variant = 'default' }) => {
   const { theme } = useTheme();
-  const colors = theme === 'light' ? gradientColors.light : gradientColors.dark;
+  const colors = variant === 'green'
+    ? gradientColors.green
+    : theme === 'light' ? gradientColors.light : gradientColors.dark;
 
   const radius = 80;
   const strokeWidth = 12;

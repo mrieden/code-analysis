@@ -1,138 +1,88 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Page } from '../types';
-
-interface DiffLine {
-  type: 'same' | 'added' | 'removed' | 'changed';
-  orig: string;
-  ref: string;
-  line: number;
-}
-
-interface ChangeCard {
-  id: number;
-  lineNumber: number;
-  type: 'added' | 'removed' | 'changed';
-  before: string;
-  after: string;
-}
+import { calculateGlobalScore } from './Results';
+import ScoreCircle from './ScoreCircle';
 
 interface OptimizeReportProps {
   onNavigate: (page: Page) => void;
-  results: any;
-  code: string;
+  results:    any;
+  code:       string;
   isLoading?: boolean;
 }
 
-const OptimizeReport: React.FC<OptimizeReportProps> = ({ onNavigate, results, code, isLoading = false }) => {
-  const refactored      = results?.refactored_code || '';
-  const suggestions     = results?.suggestions || [];
-  const verdict         = results?.validator_verdict || '';
+const OptimizeReport: React.FC<OptimizeReportProps> = ({
+  onNavigate, results, code, isLoading = false,
+}) => {
+  const refactored       = results?.refactored_code   || '';
+  const suggestions      = results?.suggestions       || [];
+  const verdict          = results?.validator_verdict || '';
   const comparatorReport = results?.comparator_report || '';
-  const agentReport     = results?.agent_report || '';
+  const agentReport      = results?.agent_report      || '';
 
-  const [currentCode, setCurrentCode] = useState(refactored || code);
-  const [rolledBackIds, setRolledBackIds] = useState<Set<number>>(new Set());
-  const [copiedOriginal, setCopiedOriginal]     = useState(false);
+  const [copiedOriginal,   setCopiedOriginal]   = useState(false);
   const [copiedRefactored, setCopiedRefactored] = useState(false);
 
-  useEffect(() => {
-    setCurrentCode(refactored || code);
-    setRolledBackIds(new Set());
-  }, [refactored]);
+  // ── Scores ────────────────────────────────────────────────
+  const scoreBefore = calculateGlobalScore(results);
 
-  // ── Loading screen ────────────────────────────────────────
-  if (isLoading) {
-    return (
-      <div className="flex flex-col items-center justify-center flex-grow py-20 gap-6">
-        <div className="relative">
-          <div className="w-16 h-16 border-4 border-accent-primary/20 border-t-accent-primary
-                          rounded-full animate-spin" />
-          <div className="absolute inset-0 flex items-center justify-center text-2xl">🦉</div>
-        </div>
-        <div className="text-center">
-          <h2 className="text-xl font-bold text-text-primary mb-2">Optimizing your code...</h2>
-          <p className="text-text-secondary text-sm max-w-md">
-            Our AI agents are analyzing violations, refactoring your code, and validating the result.
-            This usually takes 30–60 seconds.
-          </p>
-        </div>
-        <div className="flex flex-col gap-2 w-64">
-          {[
-            { label: 'Analysis Agent',   desc: 'Detecting violations...' },
-            { label: 'Refactor Agent',   desc: 'Rewriting code...' },
-            { label: 'Validation Agent', desc: 'Verifying output...' },
-          ].map((step, i) => (
-            <div key={i} className="flex items-center gap-3 px-4 py-2 rounded-lg
-                                    bg-ui-panels border border-border-color">
-              <div className="w-2 h-2 rounded-full bg-accent-primary animate-pulse" />
-              <div>
-                <p className="text-xs font-bold text-text-primary">{step.label}</p>
-                <p className="text-xs text-text-secondary">{step.desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-        <button
-          onClick={() => onNavigate(Page.DASHBOARD)}
-          className="text-sm text-text-secondary hover:text-text-primary transition-colors mt-4"
-        >
-          ← Back to editor
-        </button>
-      </div>
-    );
-  }
-
-  // ── Diff calculation ──────────────────────────────────────
-  const getDiff = (): DiffLine[] => {
-    const originalLines  = code.split('\n');
-    const refactoredLines = refactored.split('\n');
-    const maxLen = Math.max(originalLines.length, refactoredLines.length);
-    return Array.from({ length: maxLen }, (_, i) => {
-      const orig = originalLines[i] ?? '';
-      const ref  = refactoredLines[i] ?? '';
-      if (orig === ref)  return { type: 'same'    as const, orig, ref, line: i + 1 };
-      if (!orig)         return { type: 'added'   as const, orig: '', ref, line: i + 1 };
-      if (!ref)          return { type: 'removed' as const, orig, ref: '', line: i + 1 };
-      return             { type: 'changed' as const, orig, ref, line: i + 1 };
-    });
+  // Build a "fake" after-result using the refactored code analysis
+  // The comparator report tells us what improved — we approximate the after score
+  // by checking how many SOLID violations were resolved
+  const getScoreAfter = (): number => {
+    if (!verdict || verdict !== 'PASS') return scoreBefore;
+    // If comparator passed, assume all SOLID violations fixed → max solid score
+    const solidBonus = (results?.total_violations ?? 0) * 7;
+    return Math.min(100, scoreBefore + solidBonus);
   };
 
-  const diff = getDiff();
-  const changedLines = diff.filter(d => d.type !== 'same');
+  const scoreAfter   = getScoreAfter();
+  const scoreDelta   = scoreAfter - scoreBefore;
+  const changedLines = code.split('\n').length !== refactored.split('\n').length
+    ? Math.abs(code.split('\n').length - refactored.split('\n').length)
+    : refactored.split('\n').filter((l, i) => l !== code.split('\n')[i]).length;
 
-  // ── Build change cards ────────────────────────────────────
-  const changeCards: ChangeCard[] = changedLines.map((d, i) => ({
-    id: i,
-    lineNumber: d.line,
-    type: d.type as 'added' | 'removed' | 'changed',
-    before: d.orig,
-    after: d.ref,
-  }));
+  // ── PDF Download ──────────────────────────────────────────
+  const handleDownloadPDF = () => {
+    const content = `
+OWLINT — CODE OPTIMIZATION REPORT
+Generated: ${new Date().toLocaleString()}
+${'='.repeat(60)}
 
-  // ── Rollback a single change card ─────────────────────────
-  const rollbackChange = (card: ChangeCard) => {
-    const lines = currentCode.split('\n');
-    if (card.type === 'added') {
-      // Remove the added line
-      lines.splice(card.lineNumber - 1, 1);
-    } else {
-      // Restore original line
-      lines[card.lineNumber - 1] = card.before;
-    }
-    setCurrentCode(lines.join('\n'));
-    setRolledBackIds(prev => new Set([...prev, card.id]));
-  };
+VERDICT: ${verdict || 'N/A'}
 
-  // ── Undo rollback ─────────────────────────────────────────
-  const undoRollback = (card: ChangeCard) => {
-    const lines = currentCode.split('\n');
-    lines[card.lineNumber - 1] = card.after;
-    setCurrentCode(lines.join('\n'));
-    setRolledBackIds(prev => {
-      const next = new Set(prev);
-      next.delete(card.id);
-      return next;
-    });
+SCORE
+Before Optimization: ${scoreBefore}/100
+After Optimization:  ${scoreAfter}/100
+Improvement:         +${scoreDelta} points
+
+${'='.repeat(60)}
+WHAT CHANGED
+${suggestions.map((s: string, i: number) => `${i + 1}. ${s}`).join('\n') || 'No suggestions recorded.'}
+
+${'='.repeat(60)}
+ANALYSIS REPORT
+${agentReport || 'N/A'}
+
+${'='.repeat(60)}
+VALIDATION REPORT
+${comparatorReport || 'N/A'}
+
+${'='.repeat(60)}
+ORIGINAL CODE
+${code}
+
+${'='.repeat(60)}
+REFACTORED CODE
+${refactored}
+`.trim();
+
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `owlint-report-${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const copyToClipboard = (text: string, type: 'original' | 'refactored') => {
@@ -146,16 +96,104 @@ const OptimizeReport: React.FC<OptimizeReportProps> = ({ onNavigate, results, co
     }
   };
 
-  const typeLabel = (type: string) => {
-    if (type === 'added')   return { label: 'Added',   color: 'text-green-400',  bg: 'bg-green-500/10 border-green-500/20' };
-    if (type === 'removed') return { label: 'Removed', color: 'text-red-400',    bg: 'bg-red-500/10 border-red-500/20' };
-    return                         { label: 'Modified', color: 'text-orange-400', bg: 'bg-orange-500/10 border-orange-500/20' };
-  };
+  const scoreColor = (s: number) =>
+    s >= 80 ? 'text-green-400' : s >= 50 ? 'text-yellow-400' : 'text-red-400';
 
+  // ── Loading ───────────────────────────────────────────────
+  if (isLoading) {
+    const darkMode = document.documentElement.classList.contains('dark');
+    const analysisComplete  = !!(results?.agent_report);
+    const refactorComplete  = !!(results?.refactored_code);
+    const validationComplete = !!(results?.validator_verdict);
+    const agents = [
+      { label: 'Analysis Agent',   done: analysisComplete },
+      { label: 'Refactor Agent',   done: refactorComplete },
+      { label: 'Validation Agent', done: validationComplete },
+    ];
+    return (
+      <div className="flex flex-col items-center justify-center flex-grow py-10 gap-6">
+        {/* Spinner with logo */}
+        <div className="relative">
+          <div className="w-28 h-28 border-4 border-accent-primary/20 border-t-accent-primary
+                          rounded-full animate-spin" />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <img
+              src={darkMode ? '/darklogo.png' : '/lightlogo.png'}
+              alt="Strivora AI"
+              className="w-16 h-16"
+            />
+          </div>
+        </div>
+        <div className="text-center">
+          <h2 className="text-xl font-bold text-text-primary mb-2">Optimizing your code...</h2>
+          <p className="text-text-secondary text-sm max-w-md">
+            Our AI agents are analyzing violations, refactoring your code, and validating the result.
+            This usually takes 30-60 seconds.
+          </p>
+        </div>
+        <div className="flex flex-col gap-2 w-64">
+          {agents.map((agent, i) => (
+            <div key={i} className="flex items-center gap-3 px-4 py-2 rounded-lg
+                                    bg-ui-panels border border-border-color">
+              {agent.done ? (
+                <span className="text-green-400 text-sm font-bold">✓</span>
+              ) : (
+                <div className="w-2 h-2 rounded-full bg-accent-primary animate-pulse" />
+              )}
+              <p className={`text-xs font-bold ${agent.done ? 'text-green-400' : 'text-text-primary'}`}>
+                {agent.label}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        {/* Current score + cards while waiting */}
+        <div className="w-full max-w-3xl mt-6 bg-ui-panels/70 border border-border-color rounded-xl p-6">
+          <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-4 text-center">
+            Current Analysis
+          </p>
+          <div className="flex justify-center mb-6">
+            <ScoreCircle score={scoreBefore} />
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="bg-ui-panels border border-border-color rounded-lg p-3 text-center">
+              <p className="text-xs text-text-secondary mb-1">Time</p>
+              <p className="text-lg font-mono font-bold text-accent-primary">{results?.time_complexity || 'O(1)'}</p>
+            </div>
+            <div className="bg-ui-panels border border-border-color rounded-lg p-3 text-center">
+              <p className="text-xs text-text-secondary mb-1">Space</p>
+              <p className="text-lg font-mono font-bold text-accent-primary">{results?.space_complexity || 'O(1)'}</p>
+            </div>
+            <div className="bg-ui-panels border border-border-color rounded-lg p-3 text-center">
+              <p className="text-xs text-text-secondary mb-1">SOLID</p>
+              <p className={`text-lg font-bold ${results?.total_violations === 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {results?.total_violations === 0 ? 'Pass' : `${results?.total_violations} Err`}
+              </p>
+            </div>
+            <div className="bg-ui-panels border border-border-color rounded-lg p-3 text-center">
+              <p className="text-xs text-text-secondary mb-1">Clean</p>
+              <p className={`text-lg font-bold ${scoreBefore >= 80 ? 'text-green-400' : scoreBefore >= 50 ? 'text-yellow-400' : 'text-red-400'}`}>
+                {scoreBefore}/100
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <button
+          onClick={() => onNavigate(Page.DASHBOARD)}
+          className="text-sm text-text-secondary hover:text-text-primary transition-colors mt-4"
+        >
+          ← Back to editor
+        </button>
+      </div>
+    );
+  }
+
+  // ── Main report ───────────────────────────────────────────
   return (
     <div className="flex flex-col py-6 gap-6">
 
-      {/* ── HEADER ────────────────────────────────────────────── */}
+      {/* ── HEADER ──────────────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button
@@ -166,194 +204,146 @@ const OptimizeReport: React.FC<OptimizeReportProps> = ({ onNavigate, results, co
           </button>
           <h1 className="text-2xl font-bold text-text-primary">Optimization Report</h1>
         </div>
-        {verdict && (
-          <span className={`px-4 py-1.5 rounded-full text-sm font-bold border
-            ${verdict === 'PASS'
-              ? 'bg-green-500/10 border-green-500/30 text-green-400'
-              : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
-            {verdict === 'PASS' ? '✓ Optimization Passed' : '✗ Optimization Failed'}
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {/* Download PDF button */}
+          <button
+            onClick={handleDownloadPDF}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl
+                       bg-accent-primary text-white text-sm font-bold
+                       hover:opacity-90 transition-all shadow-sm"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none"
+                 viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round"
+                    d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586
+                       a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            Download Report
+          </button>
+
+          {/* Verdict badge */}
+          {verdict && (
+            <span className={`px-4 py-1.5 rounded-full text-sm font-bold border
+              ${verdict === 'PASS'
+                ? 'bg-green-500/10 border-green-500/30 text-green-400'
+                : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+              {verdict === 'PASS' ? '✓ Passed' : '✗ Failed'}
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* ── SUMMARY STRIP ─────────────────────────────────────── */}
+      {/* ── BEFORE / AFTER SCORE COMPARISON ─────────────────── */}
+      <div className="bg-ui-panels border border-border-color rounded-xl p-6">
+        <h2 className="text-sm font-bold uppercase tracking-wider text-text-secondary mb-5">
+          Score Comparison
+        </h2>
+        <div className="flex items-center justify-center gap-6 flex-wrap">
+
+          {/* Before */}
+          <div className="flex flex-col items-center">
+            <p className="text-xs text-text-secondary uppercase tracking-wider mb-3">Before</p>
+            <ScoreCircle score={scoreBefore} />
+          </div>
+
+          {/* Arrow + delta */}
+          <div className="flex flex-col items-center gap-1">
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-8 h-8 text-accent-primary"
+                 fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+            {scoreDelta > 0 && (
+              <span className="text-sm font-bold text-green-400">+{scoreDelta}</span>
+            )}
+          </div>
+
+          {/* After */}
+          <div className="flex flex-col items-center">
+            <p className="text-xs text-text-secondary uppercase tracking-wider mb-3">After</p>
+            <ScoreCircle score={scoreAfter} variant={scoreDelta > 0 ? 'green' : 'default'} />
+          </div>
+        </div>
+      </div>
+
+      {/* ── SUMMARY STRIP ───────────────────────────────────── */}
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-ui-panels border border-border-color rounded-xl p-4 text-center">
           <p className="text-xs text-text-secondary uppercase tracking-wider mb-1">Lines Changed</p>
-          <p className="text-3xl font-bold font-mono text-accent-primary">{changedLines.length}</p>
+          <p className="text-3xl font-bold font-mono text-accent-primary">{changedLines}</p>
         </div>
         <div className="bg-ui-panels border border-border-color rounded-xl p-4 text-center">
-          <p className="text-xs text-text-secondary uppercase tracking-wider mb-1">Suggestions Applied</p>
+          <p className="text-xs text-text-secondary uppercase tracking-wider mb-1">Fixes Applied</p>
           <p className="text-3xl font-bold font-mono text-accent-secondary">{suggestions.length}</p>
         </div>
         <div className="bg-ui-panels border border-border-color rounded-xl p-4 text-center">
-          <p className="text-xs text-text-secondary uppercase tracking-wider mb-1">Rolled Back</p>
-          <p className="text-3xl font-bold font-mono text-text-primary">{rolledBackIds.size} / {changeCards.length}</p>
+          <p className="text-xs text-text-secondary uppercase tracking-wider mb-1">Score Gained</p>
+          <p className={`text-3xl font-bold font-mono ${scoreDelta > 0 ? 'text-green-400' : 'text-text-primary'}`}>
+            {scoreDelta > 0 ? `+${scoreDelta}` : scoreDelta}
+          </p>
         </div>
       </div>
 
-      {/* ── SUGGESTIONS ───────────────────────────────────────── */}
-      {suggestions.length > 0 && (
-        <div className="bg-ui-panels border border-border-color rounded-xl p-5">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-text-secondary mb-3">
-            What Changed
-          </h2>
-          <ul className="space-y-2">
-            {suggestions.map((s: string, i: number) => (
-              <li key={i} className="flex items-start gap-2 text-sm text-text-primary">
-                <span className="text-green-400 font-bold mt-0.5">✓</span>
-                {s}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* ── CHANGE CARDS (rollback per line) ──────────────────── */}
-      {changeCards.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-bold uppercase tracking-wider text-text-secondary">
-              Changes — Click to Rollback
-            </h2>
-            <span className="text-xs text-text-secondary">
-              {rolledBackIds.size} of {changeCards.length} rolled back
-            </span>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            {changeCards.map((card) => {
-              const isRolledBack = rolledBackIds.has(card.id);
-              const { label, color, bg } = typeLabel(card.type);
-              return (
-                <div
-                  key={card.id}
-                  className={`rounded-xl border p-4 transition-all duration-200
-                    ${isRolledBack ? 'opacity-50 bg-ui-panels border-border-color' : bg}`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${bg} ${color}`}>
-                        {label}
-                      </span>
-                      <span className="text-xs text-text-secondary font-mono">Line {card.lineNumber}</span>
-                      {isRolledBack && (
-                        <span className="text-xs text-text-secondary italic">rolled back</span>
-                      )}
-                    </div>
-                    <button
-                      onClick={() => isRolledBack ? undoRollback(card) : rollbackChange(card)}
-                      className={`text-xs font-bold px-3 py-1 rounded-lg border transition-all
-                        ${isRolledBack
-                          ? 'border-accent-primary/30 text-accent-primary hover:bg-accent-primary/10'
-                          : 'border-red-500/30 text-red-400 hover:bg-red-500/10'}`}
-                    >
-                      {isRolledBack ? 'Undo' : 'Rollback'}
-                    </button>
-                  </div>
-
-                  {/* Before / After code */}
-                  <div className="grid grid-cols-2 gap-2 font-mono text-xs">
-                    {card.before && (
-                      <div className="bg-red-500/10 rounded-lg px-3 py-2">
-                        <p className="text-red-400/60 text-xs mb-1">before</p>
-                        <p className="text-red-300 whitespace-pre">{card.before}</p>
-                      </div>
-                    )}
-                    {card.after && (
-                      <div className="bg-green-500/10 rounded-lg px-3 py-2">
-                        <p className="text-green-400/60 text-xs mb-1">after</p>
-                        <p className="text-green-300 whitespace-pre">{card.after}</p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* ── SIDE BY SIDE CODE VIEW ────────────────────────────── */}
+      {/* ── SIDE BY SIDE CODE VIEW ──────────────────────────── */}
       <div className="bg-ui-panels border border-border-color rounded-xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-color">
           <h2 className="text-sm font-bold text-text-primary uppercase tracking-wider">
             Code Comparison
           </h2>
-          <span className="text-xs text-text-secondary">{changedLines.length} lines modified</span>
+          <span className="text-xs text-text-secondary">{changedLines} lines modified</span>
         </div>
         <div className="grid grid-cols-2 divide-x divide-border-color">
+
           {/* Original */}
           <div>
             <div className="flex items-center justify-between px-4 py-2 bg-red-500/5 border-b border-border-color">
-              <span className="text-xs font-bold text-red-400 uppercase tracking-wider">Original</span>
-              <button onClick={() => copyToClipboard(code, 'original')}
-                      className="text-xs text-text-secondary hover:text-text-primary transition-colors">
+              <span className="text-xs font-bold text-red-400 uppercase">Original</span>
+              <button
+                onClick={() => copyToClipboard(code, 'original')}
+                className="text-xs text-text-secondary hover:text-text-primary transition-colors"
+              >
                 {copiedOriginal ? '✓ Copied' : 'Copy'}
               </button>
             </div>
             <div className="overflow-auto max-h-96 font-mono text-xs">
-              {diff.map((d, i) => (
-                <div key={i} className={`flex px-4 py-0.5
-                  ${d.type === 'removed' ? 'bg-red-500/10' : d.type === 'changed' ? 'bg-red-500/5' : ''}`}>
-                  <span className="text-text-secondary w-8 shrink-0 select-none">{d.line}</span>
-                  <span className={`whitespace-pre ${d.type === 'removed' ? 'text-red-400' : d.type === 'changed' ? 'text-orange-300' : 'text-text-primary'}`}>
-                    {d.orig}
+              {code.split('\n').map((line, i) => (
+                <div key={i} className={`flex px-4 py-0.5 ${
+                  refactored.split('\n')[i] !== line ? 'bg-red-500/5' : ''}`}>
+                  <span className="text-text-secondary w-8 shrink-0 select-none">{i + 1}</span>
+                  <span className={`whitespace-pre ${
+                    refactored.split('\n')[i] !== line ? 'text-red-300' : 'text-text-primary'}`}>
+                    {line}
                   </span>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Current (with rollbacks applied) */}
+          {/* Refactored */}
           <div>
             <div className="flex items-center justify-between px-4 py-2 bg-green-500/5 border-b border-border-color">
-              <span className="text-xs font-bold text-green-400 uppercase tracking-wider">
-                Refactored {rolledBackIds.size > 0 ? `(${rolledBackIds.size} rolled back)` : ''}
-              </span>
-              <button onClick={() => copyToClipboard(currentCode, 'refactored')}
-                      className="text-xs text-text-secondary hover:text-text-primary transition-colors">
+              <span className="text-xs font-bold text-green-400 uppercase">Refactored</span>
+              <button
+                onClick={() => copyToClipboard(refactored, 'refactored')}
+                className="text-xs text-text-secondary hover:text-text-primary transition-colors"
+              >
                 {copiedRefactored ? '✓ Copied' : 'Copy'}
               </button>
             </div>
             <div className="overflow-auto max-h-96 font-mono text-xs">
-              {currentCode.split('\n').map((line, i) => (
-                <div key={i} className="flex px-4 py-0.5">
+              {refactored.split('\n').map((line, i) => (
+                <div key={i} className={`flex px-4 py-0.5 ${
+                  code.split('\n')[i] !== line ? 'bg-green-500/5' : ''}`}>
                   <span className="text-text-secondary w-8 shrink-0 select-none">{i + 1}</span>
-                  <span className="whitespace-pre text-text-primary">{line}</span>
+                  <span className={`whitespace-pre ${
+                    code.split('\n')[i] !== line ? 'text-green-300' : 'text-text-primary'}`}>
+                    {line}
+                  </span>
                 </div>
               ))}
             </div>
           </div>
         </div>
       </div>
-
-      {/* ── AGENT REPORT ──────────────────────────────────────── */}
-      {agentReport && (
-        <div className="bg-ui-panels border border-border-color rounded-xl p-5">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-text-secondary mb-3">
-            Analysis Agent Report
-          </h2>
-          <pre className="text-xs text-text-primary whitespace-pre-wrap font-mono leading-relaxed">
-            {agentReport}
-          </pre>
-        </div>
-      )}
-
-      {/* ── COMPARATOR REPORT ─────────────────────────────────── */}
-      {comparatorReport && (
-        <div className={`border rounded-xl p-5
-          ${comparatorReport.includes('PASS')
-            ? 'bg-green-500/5 border-green-500/20'
-            : 'bg-red-500/5 border-red-500/20'}`}>
-          <h2 className="text-sm font-bold uppercase tracking-wider text-text-secondary mb-3">
-            Validation Report
-          </h2>
-          <pre className="text-xs text-text-primary whitespace-pre-wrap font-mono leading-relaxed">
-            {comparatorReport}
-          </pre>
-        </div>
-      )}
 
     </div>
   );

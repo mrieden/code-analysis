@@ -33,8 +33,11 @@ const App: React.FC = () => {
     solid_report:      { S: { status: 'Pass', reason: 'Ready', suggestion: 'N/A' } },
     total_violations:  0,
     clean_report: {
-      naming_quality: { naming_score: 100, issues: [] },
-      radon: { maintainability_index: 100, raw_metrics: {} },
+      score: 0,
+      grade: 'N/A',
+      passed: false,
+      issues: [],
+      metrics: { maintainability_index: 0, loc: 0, lloc: 0, comments: 0, cc_max: 0 },
       pylint: [],
     },
     agent_report:      '',
@@ -64,10 +67,16 @@ const App: React.FC = () => {
 
   // ── Persistent WebSocket ──────────────────────────────────
   const connectWebSocket = useCallback((tok: string | null) => {
-    if (socketRef.current && socketRef.current.readyState !== WebSocket.CLOSED) {
-      socketRef.current.onclose = null;
-      socketRef.current.close();
-    }
+  // 1. Don't reconnect if already open
+  if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+    return;
+  }
+
+  // 2. Clear listeners and close if it exists in any other non-CLOSED state
+  if (socketRef.current && socketRef.current.readyState !== WebSocket.CLOSED) {
+    socketRef.current.onclose = null;
+    socketRef.current.close();
+  }
 
     const wsUrl = tok
       ? `ws://localhost:8000/ws/analyze?token=${tok}`
