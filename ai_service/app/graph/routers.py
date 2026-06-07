@@ -74,10 +74,10 @@ def convergence_router(state: AgentState) -> str:
         loops=state.get("improvement_loops", 0),
     )
 
-def equivalence_router(state) -> str:
-    # behavior changed AND repair budget left -> send back to Refactor with evidence
-    if state.get("behavior_diff") and state.get("refactor_iterations", 0) < settings.max_iterations:
+def regression_router(state: AgentState) -> str:
+    # Only a real behavior change sends code back to refactor.
+    if state.get("regression_verdict") == "DIFFERENT" and \
+        state.get("refactor_iterations", 0) < settings.max_iterations:
         return "refactor"
-    # preserved (or unverified -> flagged, never blocks): proceed to the exit
     lang = (state.get("language") or state.get("source_language") or "python").lower()
     return "translate_out" if lang in ("java", "cpp") else "done"

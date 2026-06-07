@@ -2,19 +2,29 @@ import json
 
 from schemas.state import AgentState
 from prompts.characterize_prompt import CHARACTERIZE_SYSTEM_PROMPT
-from tools import capture
 from llms import characterize_llm
+
+import re
 
 
 def _parse_spec(raw: str) -> dict:
-    raw = raw.strip()
-    if raw.startswith("~~~"):                      
-        raw = raw.strip("~")
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+    text = (raw or "").strip()
+
+    fence = re.search(r"(?:```|~~~)(?:json)?\s*\n(.*?)(?:```|~~~)", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+
+    if not text.startswith("{"):
+        brace = re.search(r"\{.*\}", text, re.DOTALL)
+        if brace:
+            text = brace.group(0)
+
     try:
-        spec = json.loads(raw)
+        spec = json.loads(text)
     except json.JSONDecodeError:
+        print(f"[characterizer] could not parse spec, got:\n{raw!r}")
         return {"mode": "stdio", "driver": "", "cases": []}
+
     spec.setdefault("mode", "stdio")
     spec.setdefault("driver", "")
     spec.setdefault("cases", [])
@@ -22,17 +32,18 @@ def _parse_spec(raw: str) -> dict:
 
 
 def characterize_node(state: AgentState) -> dict:
-    """Runs ONCE: build the golden master from the (Python) original.
-    Idempotent - if one already exists, it is a no-op, so loop re-entry is cheap."""
-    if state.get("golden_master"):
-        return {}
+    """Runs ONCE: ask the LLM to SUGGEST black-box input cases. No execution here."""
+    if state.get("test_inputs") is not None:
+        return {}                                  
 
-    # Equivalence is checked in PYTHON space, so characterize the post-translation original.
     original = state.get("original_code_converted") or state["original_code"]
     messages = [
         ("system", CHARACTERIZE_SYSTEM_PROMPT),
         ("human", f"{original}"),
     ]
     spec = _parse_spec(characterize_llm.invoke(messages).content)
-    gm = capture(original, spec)
-    return {"golden_master": gm.to_json()}
+    return {
+        "test_inputs": spec.get("cases", []),
+        "test_mode": spec.get("mode", "stdio"),
+        "test_driver": spec.get("driver", ""),
+    }

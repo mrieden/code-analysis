@@ -24,6 +24,9 @@ class AgentState(TypedDict):
     architect_rejected:        Optional[list[dict]]
     syntax_iterations:         int
     quality_scores:             list[float]
-    golden_master: Optional[str]        
-    behavior_diff: Optional[str]        
-    equivalence_report: Optional[str]
+    improvement_loops:         int
+    test_inputs: Optional[list[dict]]    
+    test_mode: Optional[str]             
+    test_driver: Optional[str]            
+    regression_verdict: Optional[str]     
+    regression_report: Optional[str]
