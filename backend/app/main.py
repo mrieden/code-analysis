@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import re
+import asyncio
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -300,9 +301,35 @@ async def delete_history_entry(entry_id: str, current_user: dict = Depends(get_c
     return {"message": "Deleted successfully"}
 
 
+# ── Multi-language repo scanning ──────────────────────────────
+# Extensions we recognise. Python is fully analysed in the scan; C++/Java are
+# detected + listed, then deep-analysed on demand through the editor pipeline
+# (detect_language -> Translate to Python -> analyzer -> ... -> Translate back).
+LANG_EXTENSIONS = {
+    "python": (".py", ".pyw"),
+    "cpp":    (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h", ".c"),
+    "java":   (".java",),
+}
+
+
+def _detect_repo_language(path: str):
+    lower = path.lower()
+    for lang, exts in LANG_EXTENSIONS.items():
+        if lower.endswith(exts):
+            return lang
+    return None
+
+
 @app.post("/github/analyze-repo")
 async def analyze_repo(payload: dict, current_user: dict = Depends(get_current_user)):
-    """Run static analysis across every Python file in a GitHub repository."""
+    """Scan a GitHub repo across Python / C++ / Java.
+
+    Python files get full static analysis (SOLID + complexity + clean code).
+    C++ / Java files are detected and listed; opening one in the editor and
+    clicking Optimize runs the multi-language translate->analyze pipeline.
+    File downloads + analysis run concurrently (bounded) with per-file timeouts
+    so large repositories don't hang or trigger a NetworkError in the browser.
+    """
     import base64
 
     token  = _require_github_token(current_user)
@@ -322,41 +349,74 @@ async def analyze_repo(payload: dict, current_user: dict = Depends(get_current_u
         f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/{branch}",
         params={"recursive": "1"},
     )
-    py_files = [
-        t["path"] for t in tree.get("tree", [])
-        if t.get("type") == "blob" and t["path"].endswith(".py")
-    ]
 
-    MAX_FILES = 40
-    truncated = len(py_files) > MAX_FILES
-    py_files  = py_files[:MAX_FILES]
+    # Collect every supported code file together with its language.
+    code_files = []
+    for t in tree.get("tree", []):
+        if t.get("type") != "blob":
+            continue
+        lang = _detect_repo_language(t.get("path", ""))
+        if lang:
+            code_files.append({"path": t["path"], "language": lang})
 
-    files = []
-    for path in py_files:
-        try:
-            data = await _github_get(
-                token,
-                f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}",
-                params={"ref": branch},
-            )
-            if not (isinstance(data, dict) and data.get("encoding") == "base64"):
-                files.append({"path": path, "error": "unsupported encoding"})
-                continue
-            content  = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
-            analysis = run_analysis_engine(content)
-            files.append({
-                "path": path,
-                "loc": content.count("\n") + 1,
-                "analysis": analysis,
-            })
-        except Exception as e:
-            files.append({"path": path, "error": str(e)})
+    MAX_FILES = 50
+    truncated = len(code_files) > MAX_FILES
+    code_files = code_files[:MAX_FILES]
+
+    language_counts = {}
+    for f in code_files:
+        language_counts[f["language"]] = language_counts.get(f["language"], 0) + 1
+
+    sem  = asyncio.Semaphore(6)        # cap concurrent GitHub calls
+    loop = asyncio.get_event_loop()
+
+    async def process(entry: dict) -> dict:
+        path = entry["path"]
+        lang = entry["language"]
+        async with sem:
+            try:
+                data = await asyncio.wait_for(
+                    _github_get(
+                        token,
+                        f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}",
+                        params={"ref": branch},
+                    ),
+                    timeout=20,
+                )
+                if not (isinstance(data, dict) and data.get("encoding") == "base64"):
+                    return {"path": path, "language": lang,
+                            "supported": lang == "python", "error": "unsupported encoding"}
+
+                content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+                loc = content.count("\n") + 1
+
+                # C++/Java: list only. Deep analysis happens in the editor flow.
+                if lang != "python":
+                    return {"path": path, "language": lang, "supported": False, "loc": loc}
+
+                # Python: run the (blocking) static engine off the event loop.
+                analysis = await asyncio.wait_for(
+                    loop.run_in_executor(None, run_analysis_engine, content),
+                    timeout=20,
+                )
+                return {"path": path, "language": lang, "supported": True,
+                        "loc": loc, "analysis": analysis}
+
+            except asyncio.TimeoutError:
+                return {"path": path, "language": lang,
+                        "supported": lang == "python", "error": "timed out"}
+            except Exception as e:
+                return {"path": path, "language": lang,
+                        "supported": lang == "python", "error": str(e)}
+
+    files = await asyncio.gather(*[process(f) for f in code_files])
 
     return {
         "owner": owner,
         "repo": repo,
         "branch": branch,
-        "total_python_files": len(py_files),
+        "total_files": len(code_files),
+        "language_counts": language_counts,
         "truncated": truncated,
         "files": files,
     }

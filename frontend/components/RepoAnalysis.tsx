@@ -12,6 +12,8 @@ interface Repo {
 
 interface FileResult {
   path: string;
+  language: 'python' | 'cpp' | 'java' | string;
+  supported: boolean;
   loc?: number;
   analysis?: any;
   error?: string;
@@ -21,7 +23,8 @@ interface RepoAnalysisResult {
   owner: string;
   repo: string;
   branch: string;
-  total_python_files: number;
+  total_files: number;
+  language_counts: Record<string, number>;
   truncated: boolean;
   files: FileResult[];
 }
@@ -39,15 +42,34 @@ const scoreColor = (s: number) =>
 const scoreBar = (s: number) =>
   s >= 80 ? 'bg-green-400' : s >= 50 ? 'bg-yellow-400' : 'bg-red-400';
 
+const LANG_LABEL: Record<string, string> = {
+  python: 'Python',
+  cpp: 'C++',
+  java: 'Java',
+};
+
+const langBadgeClass = (lang: string) => {
+  if (lang === 'python') return 'bg-blue-500/15 text-blue-300 border-blue-500/30';
+  if (lang === 'cpp') return 'bg-purple-500/15 text-purple-300 border-purple-500/30';
+  if (lang === 'java') return 'bg-orange-500/15 text-orange-300 border-orange-500/30';
+  return 'bg-text-secondary/10 text-text-secondary border-border-color';
+};
+
+const LangBadge: React.FC<{ lang: string }> = ({ lang }) => (
+  <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${langBadgeClass(lang)}`}>
+    {LANG_LABEL[lang] || lang}
+  </span>
+);
+
 const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenInEditor }) => {
-  const [repos, setRepos]             = useState<Repo[]>([]);
+  const [repos, setRepos]               = useState<Repo[]>([]);
   const [loadingRepos, setLoadingRepos] = useState(false);
-  const [analyzing, setAnalyzing]     = useState(false);
-  const [result, setResult]           = useState<RepoAnalysisResult | null>(null);
-  const [activeRepo, setActiveRepo]   = useState<Repo | null>(null);
-  const [error, setError]             = useState('');
-  const [sortKey, setSortKey]         = useState<'score' | 'path' | 'violations'>('score');
-  const [opening, setOpening]         = useState<string | null>(null);
+  const [analyzing, setAnalyzing]       = useState(false);
+  const [result, setResult]             = useState<RepoAnalysisResult | null>(null);
+  const [activeRepo, setActiveRepo]     = useState<Repo | null>(null);
+  const [error, setError]               = useState('');
+  const [sortKey, setSortKey]           = useState<'score' | 'path' | 'violations'>('score');
+  const [opening, setOpening]           = useState<string | null>(null);
 
   const authHeaders: Record<string, string> | undefined =
     token ? { Authorization: `Bearer ${token}` } : undefined;
@@ -76,7 +98,7 @@ const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenIn
     })
       .then((r) => { if (!r.ok) throw new Error('Repository analysis failed.'); return r.json(); })
       .then((d: RepoAnalysisResult) => setResult(d))
-      .catch((e) => setError(e.message))
+      .catch((e) => setError(e.message || 'Repository analysis failed.'))
       .finally(() => setAnalyzing(false));
   };
 
@@ -94,8 +116,10 @@ const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenIn
       .finally(() => setOpening(null));
   };
 
-  // ── Derived scoring ───────────────────────────────────────
-  const scored = (result?.files || [])
+  const files = result?.files || [];
+
+  // Python files carry a full analysis; we score those.
+  const scored = files
     .filter((f) => f.analysis && !f.error)
     .map((f) => ({
       ...f,
@@ -110,11 +134,28 @@ const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenIn
   const totalViolations = scored.reduce((a, f) => a + f.violations, 0);
   const worst = [...scored].sort((a, b) => a.score - b.score)[0];
 
-  const sorted = [...scored].sort((a, b) => {
-    if (sortKey === 'path') return a.path.localeCompare(b.path);
-    if (sortKey === 'violations') return b.violations - a.violations;
-    return a.score - b.score; // lowest score first
+  // Rows include every detected file (analyzed or pending) so multi-language
+  // repos surface their C++/Java files too.
+  type Row = FileResult & { score: number | null; violations: number | null };
+  const rows: Row[] = files.map((f) => {
+    if (f.analysis && !f.error) {
+      return { ...f, score: calculateGlobalScore(f.analysis), violations: f.analysis?.total_violations ?? 0 };
+    }
+    return { ...f, score: null, violations: null };
   });
+
+  const sortedRows = [...rows].sort((a, b) => {
+    if (sortKey === 'path') return a.path.localeCompare(b.path);
+    if (sortKey === 'violations') return (b.violations ?? -1) - (a.violations ?? -1);
+    // score: analyzed files first (lowest score first), pending files last
+    if (a.score === null && b.score === null) return a.path.localeCompare(b.path);
+    if (a.score === null) return 1;
+    if (b.score === null) return -1;
+    return a.score - b.score;
+  });
+
+  const counts = result?.language_counts || {};
+  const pendingCount = files.filter((f) => !f.supported && !f.error).length;
 
   if (!token) {
     return (
@@ -174,7 +215,7 @@ const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenIn
         <div className="flex flex-col items-center justify-center py-16 gap-4">
           <div className="w-12 h-12 border-4 border-accent-primary/20 border-t-accent-primary rounded-full animate-spin" />
           <p className="text-text-primary font-bold">Scanning {activeRepo?.name}…</p>
-          <p className="text-text-secondary text-sm text-center max-w-md">Running static analysis on every Python file in the repository. This can take a moment for larger repos.</p>
+          <p className="text-text-secondary text-sm text-center max-w-md">Fetching files concurrently and running static analysis on every Python file. C++ and Java files are detected for on-demand deep analysis.</p>
         </div>
       )}
 
@@ -185,16 +226,31 @@ const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenIn
           <div className="bg-ui-panels border border-border-color rounded-xl p-6">
             <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
               <h2 className="text-sm font-bold uppercase tracking-wider text-text-secondary">{result.owner}/{result.repo} · {result.branch}</h2>
-              {result.truncated && <span className="text-xs text-yellow-400">Showing first {result.total_python_files} files</span>}
+              {result.truncated && <span className="text-xs text-yellow-400">Showing first {result.total_files} files</span>}
             </div>
+
+            {/* Language breakdown */}
+            <div className="flex flex-wrap items-center gap-2 mb-5">
+              {Object.keys(counts).length > 0 ? (
+                Object.entries(counts).map(([lang, n]) => (
+                  <span key={lang} className="flex items-center gap-1.5">
+                    <LangBadge lang={lang} />
+                    <span className="text-xs text-text-secondary">{n} file{n === 1 ? '' : 's'}</span>
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-text-secondary">No supported code files detected.</span>
+              )}
+            </div>
+
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="text-center">
                 <p className={`text-4xl font-bold font-mono ${scoreColor(avgScore)}`}>{avgScore}</p>
-                <p className="text-xs text-text-secondary mt-1">Avg Quality Score</p>
+                <p className="text-xs text-text-secondary mt-1">Avg Python Score</p>
               </div>
               <div className="text-center">
                 <p className="text-4xl font-bold font-mono text-accent-primary">{scored.length}</p>
-                <p className="text-xs text-text-secondary mt-1">Files Analyzed</p>
+                <p className="text-xs text-text-secondary mt-1">Python Analyzed</p>
               </div>
               <div className="text-center">
                 <p className="text-4xl font-bold font-mono text-green-400">{cleanFiles}</p>
@@ -208,6 +264,11 @@ const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenIn
             {worst && (
               <p className="text-xs text-text-secondary mt-5 text-center">
                 Lowest scoring file: <span className="font-mono text-red-300">{worst.path}</span> ({worst.score}/100)
+              </p>
+            )}
+            {pendingCount > 0 && (
+              <p className="text-xs text-text-secondary mt-2 text-center">
+                {pendingCount} C++/Java file{pendingCount === 1 ? '' : 's'} detected — click <span className="text-accent-primary">Open</span> on any of them, then hit <span className="text-accent-primary">Optimize</span> for a full multi-language deep analysis.
               </p>
             )}
           </div>
@@ -234,6 +295,7 @@ const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenIn
                 <thead>
                   <tr className="text-left text-xs uppercase tracking-wider text-text-secondary border-b border-border-color">
                     <th className="px-4 py-2 font-semibold">File</th>
+                    <th className="px-4 py-2 font-semibold">Lang</th>
                     <th className="px-4 py-2 font-semibold">Score</th>
                     <th className="px-4 py-2 font-semibold">Time</th>
                     <th className="px-4 py-2 font-semibold">Space</th>
@@ -243,38 +305,45 @@ const RepoAnalysis: React.FC<RepoAnalysisProps> = ({ token, onNavigate, onOpenIn
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.map((f) => {
+                  {sortedRows.map((f) => {
                     const clean = f.analysis?.clean_report || {};
+                    const analyzed = f.score !== null;
+                    const barStyle = { width: `${analyzed ? f.score : 0}%` };
                     return (
                       <tr key={f.path} className="border-b border-border-color/60 hover:bg-accent-primary/5">
-                        <td className="px-4 py-2 font-mono text-xs text-text-primary max-w-[260px] truncate" title={f.path}>{f.path}</td>
+                        <td className="px-4 py-2 font-mono text-xs text-text-primary max-w-[240px] truncate" title={f.path}>{f.path}</td>
+                        <td className="px-4 py-2"><LangBadge lang={f.language} /></td>
                         <td className="px-4 py-2">
-                          <div className="flex items-center gap-2">
-                            <div className="w-16 h-1.5 rounded-full bg-text-secondary/20 overflow-hidden">
-                              <div className={`h-full ${scoreBar(f.score)}`} style={{ width: `${f.score}%` }} />
+                          {analyzed ? (
+                            <div className="flex items-center gap-2">
+                              <div className="w-16 h-1.5 rounded-full bg-text-secondary/20 overflow-hidden">
+                                <div className={`h-full ${scoreBar(f.score as number)}`} style={barStyle} />
+                              </div>
+                              <span className={`font-mono font-bold ${scoreColor(f.score as number)}`}>{f.score}</span>
                             </div>
-                            <span className={`font-mono font-bold ${scoreColor(f.score)}`}>{f.score}</span>
-                          </div>
+                          ) : (
+                            <span className="text-xs text-text-secondary italic">{f.error ? f.error : 'Deep analysis pending'}</span>
+                          )}
                         </td>
-                        <td className="px-4 py-2 font-mono text-xs">{f.analysis?.time_complexity || '—'}</td>
-                        <td className="px-4 py-2 font-mono text-xs">{f.analysis?.space_complexity || '—'}</td>
-                        <td className={`px-4 py-2 font-bold text-xs ${f.violations === 0 ? 'text-green-400' : 'text-red-400'}`}>{f.violations === 0 ? 'Pass' : `${f.violations}`}</td>
-                        <td className="px-4 py-2 font-mono text-xs">{clean.score ?? '—'}</td>
+                        <td className="px-4 py-2 font-mono text-xs">{analyzed ? (f.analysis?.time_complexity || '—') : '—'}</td>
+                        <td className="px-4 py-2 font-mono text-xs">{analyzed ? (f.analysis?.space_complexity || '—') : '—'}</td>
+                        <td className={`px-4 py-2 font-bold text-xs ${analyzed ? (f.violations === 0 ? 'text-green-400' : 'text-red-400') : 'text-text-secondary'}`}>{analyzed ? (f.violations === 0 ? 'Pass' : `${f.violations}`) : '—'}</td>
+                        <td className="px-4 py-2 font-mono text-xs">{analyzed ? (clean.score ?? '—') : '—'}</td>
                         <td className="px-4 py-2 text-right">
-                          <button onClick={() => openFile(f.path)} disabled={opening === f.path} className="text-xs font-bold text-accent-primary hover:underline disabled:opacity-40">{opening === f.path ? '…' : 'Open'}</button>
+                          <button onClick={() => openFile(f.path)} disabled={opening === f.path} className="text-xs font-bold text-accent-primary hover:underline disabled:opacity-40">{opening === f.path ? '…' : (analyzed ? 'Open' : 'Open → Optimize')}</button>
                         </td>
                       </tr>
                     );
                   })}
-                  {sorted.length === 0 && (
-                    <tr><td colSpan={7} className="px-4 py-8 text-center text-text-secondary text-sm">No analyzable Python files found.</td></tr>
+                  {sortedRows.length === 0 && (
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-text-secondary text-sm">No analyzable code files found.</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
-            {result.files.some((f) => f.error) && (
+            {files.some((f) => f.error) && (
               <div className="px-5 py-3 border-t border-border-color text-xs text-text-secondary">
-                {result.files.filter((f) => f.error).length} file(s) could not be analyzed.
+                {files.filter((f) => f.error).length} file(s) could not be fetched or analyzed.
               </div>
             )}
           </div>
