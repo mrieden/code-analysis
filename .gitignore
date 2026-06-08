@@ -184,3 +184,8 @@ log/
 # =============================================================================
 # frontend
 node_modules/
+
+# =============================================================================
+# data
+data/time_space/time_complexity_test_set.jsonl
+data/time_space/space_complexity_test_set.jsonl
