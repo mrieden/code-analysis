@@ -21,8 +21,13 @@ interface RepoPickerProps {
 
 const API = 'http://localhost:8000';
 
-// File extensions we surface first (analysis is Python-focused).
-const CODE_EXTS = ['.py', '.pyw'];
+// Code file extensions we surface (Python, C++, Java). Python is analyzed
+// directly; C++/Java run through the translate->analyze pipeline on Optimize.
+const CODE_EXTS = [
+  '.py', '.pyw',
+  '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h', '.c',
+  '.java',
+];
 
 const RepoPicker: React.FC<RepoPickerProps> = ({ token, onClose, onSelectFile }) => {
   const [repos, setRepos]               = useState<Repo[]>([]);
@@ -198,7 +203,7 @@ const RepoPicker: React.FC<RepoPickerProps> = ({ token, onClose, onSelectFile })
                     checked={onlyPython}
                     onChange={(e) => setOnlyPython(e.target.checked)}
                   />
-                  .py only
+                  Code files only
                 </label>
               </div>
               <ul className="divide-y divide-border-color">

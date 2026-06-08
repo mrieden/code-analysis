@@ -54,43 +54,23 @@ def _refactor_prompt(instruction: str, inputs: list[str], extra_rules: tuple[str
     ])
 
 
-# First pass — fixes the architect's vetted, prioritized directives.
 REFACTOR_SYSTEM_PROMPT = _refactor_prompt(
     instruction=(
-        "You are given code and a prioritized list of refactor directives produced by a senior "
-        "software architect who has already reviewed the static-analysis findings and discarded "
-        "every false positive. Every directive listed is real — apply ALL of them, working from "
-        "the highest severity down."
+        "You are given Python code and a prioritized list of refactor directives produced by a "
+        "senior software architect who has already reviewed the latest static-analysis findings "
+        "for THIS version of the code and discarded every false positive. Every directive listed "
+        "is real — apply ALL of them, working from the highest severity down. The code may already "
+        "be partially refactored from an earlier pass; keep those correct fixes intact and apply "
+        "only what the directives now ask for."
     ),
     inputs=[
-        "The code to refactor",
+        "The code to refactor (the latest version)",
         "The architect's prioritized refactor directives (already vetted — fix every one)",
     ],
 )
 
 
-# Re-entry after the comparator returns FAIL.
-REFACTOR_SYSTEM_PROMPT2 = _refactor_prompt(
-    instruction=(
-        "The comparator has reviewed your refactored code and found remaining issues. "
-        "Read the 'Refactor Instructions' section in the comparator report carefully. "
-        "Fix ONLY the numbered actions listed there — nothing more, nothing less."
-    ),
-    inputs=[
-        "Your previous refactored version (the code to fix)",
-        "The comparator report containing the exact Refactor Instructions to follow",
-    ],
-    extra_rules=(
-        "- Fix ONLY what is listed in the 'Refactor Instructions' section of the comparator report",
-        "- Do not re-fix issues already marked RESOLVED by the comparator",
-        "- Do not regress any fix that was already correct in your previous version",
-        "- If an instruction says UNRESOLVED, the fix was missed — apply it now",
-        "- If an instruction says REGRESSED, your previous fix introduced it — undo or correct it",
-    ),
-)
-
-
-# Re-entry after a syntax or runtime error.
+# Repair pass — re-entry after a syntax OR runtime error. Fix the error only.
 REFACTOR_SYNTAX_PROMPT = _refactor_prompt(
     instruction=(
         "Your previously refactored code failed to compile or run. Fix ONLY the reported error "
@@ -106,3 +86,19 @@ REFACTOR_SYNTAX_PROMPT = _refactor_prompt(
         "- Do not re-architect or add changes beyond fixing the error",
     ),
 )
+
+REFACTOR_BEHAVIOR_PROMPT = """Your previous refactor CHANGED the program's behavior.
+Below is a black-box equivalence report: inputs where the refactored code produced a
+different result than the original.
+
+Fix the refactored code so it reproduces the ORIGINAL behavior on these inputs, while
+KEEPING your structural/quality improvements. Do NOT rename public (module-level,
+non-underscore) functions - they are the program's contract. Return the full corrected
+code only.
+
+Equivalence report:
+{behavior_diff}
+
+Current refactored code:
+{refactored_code}
+"""

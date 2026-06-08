@@ -1,9 +1,11 @@
 from schemas import AgentState
 from helpers.config import get_settings, Settings
+from tools import ConvergenceController
 
 settings = get_settings()
 
 max_iterations = settings.max_iterations
+controller = ConvergenceController()
 
 def analyzer_router(state: AgentState) -> str:
     refactor_iterations = state.get("refactor_iterations", 0)
@@ -32,52 +34,50 @@ def syntax_check_router2(state: AgentState) -> str:
             return "proceed"
 
 
-
-def comparator_router(state: AgentState) -> str:
-    report = state.get("comparator_report", "")
-    iterations = state.get("refactor_iterations", 0)
-
-    if iterations >= max_iterations:
-        return "end"
-    if "FAIL" in report:
-        return "refactor"
-    return "executer"
-
-
 def executer_router(state: AgentState) -> str:
     result = state.get("execution_result", "")
     iterations = state.get("refactor_iterations", 0)
     source_language = state.get("source_language")
 
     if iterations >= max_iterations:
-        if source_language != "python":
-            return "translator"
         return "end"
 
     if "FAIL" in result:
         return "refactor"
     
-    if source_language != "python":
-        return "translator"
-    return "end"
+    return "equivalence"
 
 def main_router(state: AgentState) -> str:
     source_language = state.get("source_language", "unsupported")
     if source_language == "unsupported" or source_language == "unknown":
         return "end"
     elif source_language == "python":
-        return "analyzer"
+        return "characterize"
     else:
         return "translator"
     
 def translator_router(state: AgentState) -> str:
     iterations = state.get("refactor_iterations", 0)
     if iterations == 0:
-        return "analyzer"
+        return "characterize"
     else:   
         return "end"
     
 def route_after_architect(state):
     if state["architect_verdict"] == "HALT_PERFECT_ENOUGH":
         return 'END'
-    return "refactor" if not state.get("refactored_code") else "comparator"
+    return "refactor" if not state.get("refactored_code") else "convergence"
+
+def convergence_router(state: AgentState) -> str:
+    return controller.decide(
+        history=state.get("quality_scores", []),
+        loops=state.get("improvement_loops", 0),
+    )
+
+def regression_router(state: AgentState) -> str:
+    # Only a real behavior change sends code back to refactor.
+    if state.get("regression_verdict") == "DIFFERENT" and \
+        state.get("refactor_iterations", 0) < settings.max_iterations:
+        return "refactor"
+    lang = (state.get("language") or state.get("source_language") or "python").lower()
+    return "translate_out" if lang in ("java", "cpp") else "done"

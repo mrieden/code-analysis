@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import re
+import asyncio
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -9,13 +10,13 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 
 # ── Path setup for new folder structure ──────────────────────
-BACKEND_APP_PATH = os.path.dirname(os.path.abspath(__file__))   # backend/app/
-AI_SERVICE_PATH  = os.path.abspath(os.path.join(
-    BACKEND_APP_PATH, "..", "..", "ai_service", "app"
-))
+ROOT_PATH        = os.path.dirname(os.path.abspath(__file__))   # repo root
+AI_SERVICE_PATH  = os.path.join(ROOT_PATH, "ai_service", "app")
+DATABASE_PATH    = os.path.join(ROOT_PATH, "database")
 
-sys.path.insert(0, BACKEND_APP_PATH)   # for auth.py, database.py
+sys.path.insert(0, ROOT_PATH)
 sys.path.insert(0, AI_SERVICE_PATH)    # for graph, services, agents, etc.
+sys.path.insert(0, DATABASE_PATH)      # for auth.py, database.py
 
 # ── SOLID / Complexity / Clean Code imports ───────────────────
 from services import (
@@ -27,9 +28,17 @@ from services import (
 
 # ── Agent graph import ────────────────────────────────────────
 from graph import build_graph
+from graph.nodes import detect_language
+from agents import translate_to_python
 
 # ── Auth & DB imports ─────────────────────────────────────────
-from auth import get_current_user, router as auth_router
+from auth import (
+    get_current_user,
+    router as auth_router,
+    _github_get,
+    _require_github_token,
+    GITHUB_API,
+)
 from database import db
 
 # ── LangChain ─────────────────────────────────────────────────
@@ -256,6 +265,8 @@ def run_agent_pipeline(analysis: dict, code_str: str, model_key: str = "llama-3.
             "validator_verdict": verdict,
             "refactored_code": refactored_code,
             "suggestions": suggestions,
+            "original_code_converted": final_state.get("original_code_converted", ""),
+            "source_language": final_state.get("source_language", ""),
         }
 
     except Exception as e:
@@ -293,6 +304,127 @@ async def delete_history_entry(entry_id: str, current_user: dict = Depends(get_c
     return {"message": "Deleted successfully"}
 
 
+# Multi-language repo scanning.
+# Python is fully analysed in the scan; C++/Java are detected + listed, then
+# deep-analysed on demand through the editor pipeline
+# (detect_language -> Translate to Python -> analyzer -> ... -> Translate back).
+LANG_EXTENSIONS = {
+    "python": (".py", ".pyw"),
+    "cpp":    (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h", ".c"),
+    "java":   (".java",),
+}
+
+
+def _detect_repo_language(path: str):
+    lower = path.lower()
+    for lang, exts in LANG_EXTENSIONS.items():
+        if lower.endswith(exts):
+            return lang
+    return None
+
+
+@app.post("/github/analyze-repo")
+async def analyze_repo(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Scan a GitHub repo across Python / C++ / Java.
+
+    Python files get full static analysis (SOLID + complexity + clean code).
+    C++ / Java files are detected and listed; opening one in the editor and
+    clicking Optimize runs the multi-language translate->analyze pipeline.
+    File downloads + analysis run concurrently (bounded) with per-file timeouts
+    so large repositories don't hang or trigger a NetworkError in the browser.
+    """
+    import base64
+
+    token  = _require_github_token(current_user)
+    owner  = payload.get("owner")
+    repo   = payload.get("repo")
+    branch = payload.get("branch")
+
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="owner and repo are required")
+
+    if not branch:
+        repo_info = await _github_get(token, f"{GITHUB_API}/repos/{owner}/{repo}")
+        branch = repo_info.get("default_branch", "main")
+
+    tree = await _github_get(
+        token,
+        f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/{branch}",
+        params={"recursive": "1"},
+    )
+
+    # Collect every supported code file together with its language.
+    code_files = []
+    for t in tree.get("tree", []):
+        if t.get("type") != "blob":
+            continue
+        lang = _detect_repo_language(t.get("path", ""))
+        if lang:
+            code_files.append({"path": t["path"], "language": lang})
+
+    MAX_FILES = 50
+    truncated = len(code_files) > MAX_FILES
+    code_files = code_files[:MAX_FILES]
+
+    language_counts = {}
+    for f in code_files:
+        language_counts[f["language"]] = language_counts.get(f["language"], 0) + 1
+
+    sem  = asyncio.Semaphore(6)        # cap concurrent GitHub calls
+    loop = asyncio.get_event_loop()
+
+    async def process(entry: dict) -> dict:
+        path = entry["path"]
+        lang = entry["language"]
+        async with sem:
+            try:
+                data = await asyncio.wait_for(
+                    _github_get(
+                        token,
+                        f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}",
+                        params={"ref": branch},
+                    ),
+                    timeout=20,
+                )
+                if not (isinstance(data, dict) and data.get("encoding") == "base64"):
+                    return {"path": path, "language": lang,
+                            "supported": lang == "python", "error": "unsupported encoding"}
+
+                content = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+                loc = content.count("\n") + 1
+
+                # C++/Java: list only. Deep analysis happens in the editor flow.
+                if lang != "python":
+                    return {"path": path, "language": lang, "supported": False, "loc": loc}
+
+                # Python: run the (blocking) static engine off the event loop.
+                analysis = await asyncio.wait_for(
+                    loop.run_in_executor(None, run_analysis_engine, content),
+                    timeout=20,
+                )
+                return {"path": path, "language": lang, "supported": True,
+                        "loc": loc, "analysis": analysis}
+
+            except asyncio.TimeoutError:
+                return {"path": path, "language": lang,
+                        "supported": lang == "python", "error": "timed out"}
+            except Exception as e:
+                return {"path": path, "language": lang,
+                        "supported": lang == "python", "error": str(e)}
+
+    files = await asyncio.gather(*[process(f) for f in code_files])
+
+    return {
+        "owner": owner,
+        "repo": repo,
+        "branch": branch,
+        "total_files": len(code_files),
+        "language_counts": language_counts,
+        "truncated": truncated,
+        "files": files,
+    }
+
+
 # ─────────────────────────────────────────────────────────────
 # WEBSOCKET
 # ─────────────────────────────────────────────────────────────
@@ -320,20 +452,45 @@ async def websocket_endpoint(websocket: WebSocket):
             trigger  = payload.get("trigger", "typing")
             model_key = payload.get("model", "llama-3.1-8b")
 
-            # Step 1: Always run static analysis (real-time, no LLM)
-            analysis_result = run_analysis_engine(code)
+            # Detect language (regex heuristic, no LLM) so we never run the
+            # Python-only static analyzers on Java/C++ source directly.
+            lang = (detect_language({"original_code": code}) or {}).get(
+                "source_language", "unknown"
+            )
 
-            # Step 2: Run agent pipeline only on Optimize click
             if trigger == "analyze":
-                agent_result   = run_agent_pipeline(analysis_result, code, model_key)
-                final_response = {**analysis_result, **agent_result}
+                # ===== Optimize click: full agent pipeline =====
+                if lang in ("java", "cpp"):
+                    # The graph translates source -> Python, analyzes,
+                    # refactors, then translates back. Static metrics are
+                    # computed on the Python translation, since Java/C++
+                    # cannot be parsed by Python's ast module.
+                    agent_result = run_agent_pipeline({}, code, model_key)
+                    converted    = agent_result.get("original_code_converted") or ""
+                    if converted.strip():
+                        analysis_result = run_analysis_engine(converted)
+                        analysis_result["analyzed_code"] = converted
+                    else:
+                        analysis_result = {
+                            "time_complexity": "N/A",
+                            "space_complexity": "N/A",
+                            "solid_report": {},
+                            "clean_report": {},
+                            "total_violations": 0,
+                        }
+                else:
+                    analysis_result = run_analysis_engine(code)
+                    agent_result    = run_agent_pipeline(analysis_result, code, model_key)
 
-                # Step 3: Save to history if user logged in
+                final_response = {**analysis_result, **agent_result, "language": lang}
+
+                # Save to history if user logged in
                 if current_user:
                     await db.history.insert_one({
                         "entry_id":       str(datetime.utcnow().timestamp()),
                         "user_id":        str(current_user["github_id"]),
                         "created_at":     datetime.utcnow(),
+                        "language":       lang,
                         "original_code":  code,
                         "analysis_report": analysis_result,
                         "refactored_code": agent_result.get("refactored_code", ""),
@@ -341,7 +498,46 @@ async def websocket_endpoint(websocket: WebSocket):
                         "verdict":        agent_result.get("validator_verdict", "FAIL"),
                     })
             else:
-                final_response = analysis_result
+                # ===== Real-time typing: no LLM calls =====
+                if lang in ("java", "cpp"):
+                    # Live analysis for non-Python: translate to Python (one LLM
+                    # call), then run the SAME static analyzers Python uses so
+                    # the report cards populate live, just like Python. The
+                    # heavy refactor pipeline still only runs on Optimize.
+                    try:
+                        converted = (translate_to_python(
+                            {"source_language": lang, "original_code": code}
+                        ) or {}).get("original_code_converted", "")
+                    except Exception as e:
+                        print(f"DEBUG: live translate failed: {e}")
+                        converted = ""
+                    if converted.strip():
+                        final_response = run_analysis_engine(converted)
+                        final_response["analyzed_code"] = converted
+                        final_response["language"] = lang
+                    else:
+                        final_response = {
+                            "language": lang,
+                            "notice": f"Could not translate {lang.upper()} for analysis - try Optimize.",
+                            "time_complexity": "N/A",
+                            "space_complexity": "N/A",
+                            "solid_report": {},
+                            "clean_report": {},
+                            "total_violations": 0,
+                        }
+                elif lang == "unsupported":
+                    final_response = {
+                        "language": "unsupported",
+                        "notice": "Language not supported yet. Supported: Python, Java, C++.",
+                        "time_complexity": "-",
+                        "space_complexity": "-",
+                        "solid_report": {},
+                        "clean_report": {},
+                        "total_violations": 0,
+                    }
+                else:
+                    final_response = run_analysis_engine(code)
+                    final_response["language"] = lang
 
             await websocket.send_json(final_response)
             print("Response sent to Frontend!")
