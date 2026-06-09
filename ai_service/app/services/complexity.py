@@ -1,14 +1,15 @@
 import sys
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent          # ai_service/app/services/
-_AI_ROOT = _HERE.parent.parent                   # ai_service/
+_HERE = Path(__file__).resolve().parent
+_AI_ROOT = _HERE.parent.parent
 
-# complexity1.py lives alongside this file or one level up — adjust if needed
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_AI_ROOT))
 
 from complexity1 import analyze
+
+_MODEL_PATH = _HERE / "hybrid.joblib"
 
 _LABEL_TO_BIG_O = {
     "constant":  "O(1)",
@@ -32,7 +33,6 @@ def estimate_complexity(code_str: str):
         return time_complexity, result.space_complexity
     except Exception as exc:
         return "Error", f"{type(exc).__name__}: {exc}"
-
 
 if __name__ == "__main__":
     code = """from math import *
