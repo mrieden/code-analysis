@@ -1,8 +1,14 @@
-from complexity1 import analyze
+import sys
 from pathlib import Path
 
-# Resolve the model path relative to this file, not the cwd
-_MODEL_PATH = Path(__file__).resolve().parent / "hybrid.joblib"
+_HERE = Path(__file__).resolve().parent          # ai_service/app/services/
+_AI_ROOT = _HERE.parent.parent                   # ai_service/
+
+# complexity1.py lives alongside this file or one level up — adjust if needed
+sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_AI_ROOT))
+
+from complexity1 import analyze
 
 _LABEL_TO_BIG_O = {
     "constant":  "O(1)",
