@@ -1,4 +1,4 @@
-code,true_time
+solution_code,time_complexity_inferred
 "#A. Array
 n = int(input())
 a,b,c =[],[],[]
