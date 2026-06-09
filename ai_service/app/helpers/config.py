@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -18,9 +20,10 @@ class Settings(BaseSettings):
     max_improvement_loops: int = 3
     min_gain: float = 0.05
 
-    openai_api_base: str = "https://openrouter.ai/api/v1"
+    model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parent.parent.parent.parent / ".env", extra="ignore")
 
     model_config = SettingsConfigDict(env_file=".env")
 
 def get_settings():
     return Settings()
+    
