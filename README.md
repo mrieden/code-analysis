@@ -1,6 +1,8 @@
 > Multi-agent Python code analysis and automated refactoring, exposed through a full-stack web app (React + FastAPI) and powered by LangGraph.
+> 
 
 > Astivora takes raw code, detects its language, runs deterministic SOLID / complexity / clean-code analysis, then drives an agentic LangGraph pipeline that automatically refactors the code, validates it, executes it (for Python) in a hardened Docker sandbox, and runs a lightweight **behavioral regression check** (original vs refactored) before finalizing. Python is analyzed directly; Java and C++ are translated to Python, processed, then translated back.
+> 
 
 The project is a **monorepo** with four cooperating parts:
 
@@ -12,12 +14,15 @@ The project is a **monorepo** with four cooperating parts:
 | Database / Auth | `database/` | MongoDB (Motor) + JWT | GitHub OAuth, user records, analysis history |
 
 <aside>
-🔗 The backend imports the analysis engine and agent graph directly from `ai_service/app` via `sys.path`, so the two services run in one Python process.
+🔗
+
+The backend imports the analysis engine and agent graph directly from `ai_service/app` via `sys.path`, so the two services run in one Python process.
+
 </aside>
 
 ## Architecture (AI pipeline)
 
-The pipeline combines **three core LLM agents** (Translator, Architect, Refactor), one **LLM-assisted Characterizer**, and several **deterministic plain-function nodes** — including a **Convergence controller** (which replaced the old LLM Comparator) and a **Regression check** — wired together as a directed graph with conditional edges and a hard cap of `max_iterations` (default 3) refactor loops.
+The pipeline combines **three core LLM agents** (Translator, Architect, Refactor), one **LLM-assisted Characterizer**, and several **deterministic plain-function nodes** — including a **Convergence controller** (which replaced the old LLM Comparator) and a **Regression check** — wired together as a directed graph with conditional edges. Refactoring is bounded by two caps: `max_iterations` (default 3, hard cap on refactor/syntax attempts) and `max_improvement_loops` (default 3, convergence loop cap).
 
 ```mermaid
 flowchart TD
@@ -51,10 +56,13 @@ flowchart TD
 
 ### LLM agents + Characterizer
 
-- **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input.
-- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its own output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of refactor directives. The verdict (`HALT_PERFECT_ENOUGH` vs proceed) is recomputed in code, never trusted from the model.
-- **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Executor, or **Regression check** flagged (in that priority order).
-- **Characterizer (LLM-assisted)** — runs once at ingestion. Reads the Python original, decides the behavioral boundary (`stdio` vs `api`), and designs a coverage-minded input suite. The LLM only **suggests** the inputs; running both versions on them and comparing observations happens later in the Regression check and is fully deterministic.
+- **Translator Agent** — converts Java/C++ → Python before analysis, and Python → the original language after refactoring. Runs only for non-Python input. (`model1`, Groq, temp 0.2)
+- **Architect Agent** — runs after every analyzer pass. Consumes the raw analyzer report, validates its own output against a Pydantic schema (with retries), classifies findings (SOLID / Clean Code / Complexity) with severity + confidence, and emits a numbered, severity-sorted list of refactor directives. The verdict (`HALT_PERFECT_ENOUGH` vs proceed) is recomputed in code, never trusted from the model. (`model4`, OpenRouter, temp 0.2)
+- **Refactor Agent** — rewrites code to satisfy the Architect's directives on the first pass, and on re-entry fixes only what the Syntax Check, Executor, or **Regression check** flagged (in that priority order). (`model1`, Groq, temp 0.1)
+- **Characterizer (LLM-assisted)** — runs once at ingestion. Reads the Python original, decides the behavioral boundary (`stdio` vs `api`), and designs a coverage-minded input suite. The LLM only **suggests** the inputs; running both versions on them and comparing observations happens later in the Regression check and is fully deterministic. (`model2`, Groq, temp 0.1)
+
+> A separate summary LLM (`report_llm`, `model3`, Groq, temp 0.2) is defined in `llms.py` for an optional final-report feature; it is not yet wired into the graph.
+> 
 
 ### Plain-function nodes (no LLM)
 
@@ -87,15 +95,23 @@ Verdicts: **preserved** (`SAME`), **changed** (`DIFFERENT`, with a counterexampl
 
 | Node | Type | Model (default) | Provider | Temp |
 | --- | --- | --- | --- | --- |
-| Translator | LLM | `model3` (e.g. llama-3.3-70b-versatile) | Groq | 0.2 |
-| Characterizer | LLM-assisted | `model2` (e.g. llama-4-scout-17b-16e-instruct) | Groq | 0.1 |
-| Architect | LLM | meta-llama/llama-4-scout-17b-16e-instruct | Groq | 0 |
-| Refactor | LLM | `model1` (e.g. openrouter/owl-alpha) | OpenRouter | 0.2 |
+| Translator | LLM | `model1` (openai/gpt-oss-120b) | Groq | 0.2 |
+| Characterizer | LLM-assisted | `model2` (llama-3.3-70b-versatile) | Groq | 0.1 |
+| Architect | LLM | `model4` (openai/gpt-oss-120b:free) | OpenRouter | 0.2 |
+| Refactor | LLM | `model1` (openai/gpt-oss-120b) | Groq | 0.1 |
+| Report summary | LLM | `model3` (openai/gpt-oss-20b) | Groq | 0.2 |
 | detect_language · analyzer · syntax_check · convergence · regression check · executer | Plain fn | — | — | — |
+
+<aside>
+💡
+
+The `openai/gpt-oss-*` models are open-weight models hosted on Groq, so `model1`–`model3` are Groq calls; only `model4` (Architect) goes through OpenRouter.
+
+</aside>
 
 ## Project structure
 
-```text
+```
 code-analysis/
 ├── frontend/                 # Vite + React 19 + TypeScript web app (port 3000)
 │   ├── App.tsx               # Root component; WebSocket client + GitHub OAuth callback
@@ -119,8 +135,10 @@ code-analysis/
 │       │   └── tests/        # calibration scripts (SRP / OCP / LSP / ISP / DIP)
 │       ├── tools/            # analysis_tool.py, execute_code_tool.py, convergence.py, regression_check.py
 │       ├── prompts/          # architect / characterize / refactor / translator prompts
-│       ├── schemas/state.py  # AgentState TypedDict (+ quality_scores, test_inputs, test_mode,
-│       │                     #   test_driver, regression_verdict, regression_report)
+│       ├── schemas/
+│       │   ├── characterization.py  # CharacterizationSpec (Pydantic) for the Characterizer
+│       │   └── state.py             # AgentState TypedDict (+ quality_scores, test_inputs, test_mode,
+│       │                            #   test_driver, regression_verdict, regression_report)
 │       ├── helpers/config.py # pydantic-settings (reads .env)
 │       ├── llms.py           # Groq + OpenRouter LLM instantiation
 │       ├── app.py            # Standalone Streamlit UI
@@ -172,9 +190,13 @@ Create a `.env` in the repo root (loaded by both the AI settings and the backend
 # ── LLMs (required) ──
 GROQ_API_KEY=
 OPENROUTER_API_KEY=
-model1=openrouter/owl-alpha                          # Refactor
-model2=meta-llama/llama-4-scout-17b-16e-instruct     # Characterizer
-model3=llama-3.3-70b-versatile                       # Translator
+
+# Groq models
+model1=openai/gpt-oss-120b          # Translator + Refactor
+model2=llama-3.3-70b-versatile      # Characterizer
+model3=openai/gpt-oss-20b           # Report summarizer (report_llm)
+# OpenRouter model
+model4=openai/gpt-oss-120b:free     # Architect
 openai_api_base=https://openrouter.ai/api/v1
 
 # ── Loop controls ──
@@ -186,7 +208,7 @@ min_gain=0.05
 LANGSMITH_API_KEY=
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
-LANGCHAIN_PROJECT=Astivora
+LANGCHAIN_PROJECT=CodeGuard
 
 # ── Database ──
 MONGODB_URL=mongodb://localhost:27017
@@ -200,7 +222,10 @@ FRONTEND_URL=http://localhost:3000
 ```
 
 <aside>
-🔑 Create the GitHub OAuth App at GitHub → Settings → Developer settings → OAuth Apps. Set the Authorization callback URL to `http://localhost:8000/auth/github/callback`.
+🔑
+
+Create the GitHub OAuth App at GitHub → Settings → Developer settings → OAuth Apps. Set the Authorization callback URL to `http://localhost:8000/auth/github/callback`.
+
 </aside>
 
 Run the API (from the repo root) on port 8000:
@@ -260,6 +285,8 @@ The Executor runs refactored code in a Docker container with `cap_drop=["ALL"]`,
 - **`/main.py` (repo root) is a stale duplicate** of `backend/app/main.py` with broken `sys.path` math and a missing `database/` path; running `python main.py` from the root will fail. Use `uvicorn backend.app.main:app`. Consider deleting the root copy.
 - **Docker stubs are empty:** `dockercompose.yml`, `backend/dockerfile`, `ai_service/dockerfile`, and `frontend/dockerfile` are all 0-byte placeholders — there is no working container orchestration yet.
 - **`database/init.sql` is empty and unused** (the app persists to MongoDB, not SQL).
+- **Naming is inconsistent:** the README/product is called **Astivora**, but `llms.py` sets `X-Title: "CodeGuard"` and `config.py`/`.env.example` default `LANGCHAIN_PROJECT` to `CodeGuard`. Pick one and apply it everywhere.
+- **`report_llm` (`model3`) is defined but unused in the graph** — the Report/summary node is not wired into `workflow.py` yet.
 - The frontend's backend URLs (`localhost:8000`) and the backend's CORS/redirect origins (`localhost:3000`) are hard-coded; change them in code for non-local deployments.
 
 ## License
