@@ -6,6 +6,9 @@ from schemas.characterization import CharacterizationSpec
 
 settings = get_settings()
 
+
+settings = get_settings()
+
 translator_llm = ChatGroq(
     model= settings.model1,
     api_key=settings.GROQ_API_KEY,
@@ -29,15 +32,10 @@ characterize_structured = characterize_llm.with_structured_output(
     CharacterizationSpec, method="json_mode", include_raw=True
 )
 
-architect_llm = ChatOpenAI(
-    model= settings.model4,
-    openai_api_key=settings.OPENROUTER_API_KEY,
-    openai_api_base=settings.openai_api_base,
+architect_llm =  ChatGroq(
+    model= settings.model1,
+    api_key=settings.GROQ_API_KEY,
     temperature=0.2,
-    default_headers={
-        "HTTP-Referer": "http://localhost:3000", 
-        "X-Title": "CodeGuard",
-    },
 )
 
 report_llm = ChatGroq(
@@ -45,5 +43,4 @@ report_llm = ChatGroq(
 	api_key=settings.GROQ_API_KEY,
 	temperature=0.2,
 )
-
 
