@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Page } from '../types';
 import CodeEditor from './CodeEditor';
 import RepoPicker from './RepoPicker';
@@ -26,14 +26,19 @@ interface DashboardProps {
   language: 'python' | 'java';
   setLanguage: (lang: 'python' | 'java') => void;
   onAnalyze: () => void;
+  onSolidAnalyze?: () => void;
+  solidLoading?: boolean;
   selectedModel: string;
   setSelectedModel: (model: string) => void;
   token: string | null;
+  githubConnected?: boolean;
 }
 
 export const MODEL_OPTIONS = [
-  { value: 'llama-3.1-8b',  label: 'Llama 3.1 8B',  desc: 'Fast & efficient' },
-  { value: 'llama-3.3-70b', label: 'Llama 3.3 70B', desc: 'Most accurate · 128k ctx' },
+  { value: 'openai/gpt-oss-120b',      label: 'GPT-OSS 120B',            desc: 'Translator + Refactor' },
+  { value: 'llama-3.3-70b-versatile',  label: 'Llama 3.3 70B Versatile', desc: 'Characterizer' },
+  { value: 'openai/gpt-oss-20b',       label: 'GPT-OSS 20B',             desc: 'Report summarizer' },
+  { value: 'openai/gpt-oss-120b:free', label: 'GPT-OSS 120B (free)',     desc: 'Architect' },
 ];
 
 const statusBg = (status: string) => {
@@ -100,9 +105,33 @@ const AnalysisCard: React.FC<CardProps> = ({ title, value, sub, status, onClick,
 
 const Dashboard: React.FC<DashboardProps> = ({
   onNavigate, code, onCodeChange, analysisResult,
-  onAnalyze, language, setLanguage, selectedModel, setSelectedModel, token,
+  onAnalyze, onSolidAnalyze, solidLoading, language, setLanguage, selectedModel, setSelectedModel, token, githubConnected,
 }) => {
   const [showRepoPicker, setShowRepoPicker] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Upload a source file straight from the user's PC into the editor.
+  const handleUploadFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const name = file.name.toLowerCase();
+    // Only Python, Java and C++ source files are allowed.
+    const allowed = ['.py', '.java', '.cpp', '.cc', '.cxx', '.c++', '.hpp', '.hh', '.hxx'];
+    if (!allowed.some(ext => name.endsWith(ext))) {
+      alert('Unsupported file type. Please upload a Python (.py), Java (.java) or C++ (.cpp / .cc / .cxx / .hpp) file.');
+      e.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      onCodeChange(String(reader.result || ''));
+      if (name.endsWith('.java')) setLanguage('java');
+      else if (name.endsWith('.py')) setLanguage('python');
+      // C++ files load as-is; the analysis language selector stays unchanged.
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // allow re-uploading the same file
+  };
   const { time_complexity, space_complexity, total_violations, solid_report, clean_report } = analysisResult;
   const cleanScore = clean_report?.score ?? 0;
   const cleanGrade = clean_report?.grade ?? 'N/A';
@@ -143,35 +172,68 @@ const Dashboard: React.FC<DashboardProps> = ({
         <div className="lg:w-1/2 flex flex-col gap-3 min-h-0">
 
           {/* Editor toolbar */}
-          {token && (
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Editor</span>
-              <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Editor</span>
+            <div className="flex items-center gap-2">
+
+              {/* Hidden file input for direct PC upload */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".py,.java,.cpp,.cc,.cxx,.c++,.hpp,.hh,.hxx"
+                className="hidden"
+                onChange={handleUploadFile}
+              />
+
+              {/* Upload from PC — always available */}
               <button
-                onClick={() => onNavigate(Page.REPO_ANALYSIS)}
+                onClick={() => fileInputRef.current?.click()}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border-color bg-ui-panels text-text-secondary hover:text-text-primary hover:border-accent-primary/50 text-xs font-bold transition-all"
               >
-                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7h18M3 12h18M3 17h18" /></svg>
-                Scan repo
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0-12L8 8m4-4l4 4" /></svg>
+                Upload
               </button>
-              <button
-                onClick={() => setShowRepoPicker(true)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border-color
-                           bg-ui-panels text-text-secondary hover:text-text-primary hover:border-accent-primary/50
-                           text-xs font-bold transition-all"
-              >
-                <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z" />
-                </svg>
-                Import from GitHub
-              </button>
-              </div>
+
+              {/* GitHub-powered features: only when GitHub is connected */}
+              {token && githubConnected && (
+                <>
+                  <button
+                    onClick={() => onNavigate(Page.REPO_ANALYSIS)}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border-color bg-ui-panels text-text-secondary hover:text-text-primary hover:border-accent-primary/50 text-xs font-bold transition-all"
+                  >
+                    <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7h18M3 12h18M3 17h18" /></svg>
+                    Scan repo
+                  </button>
+                  <button
+                    onClick={() => setShowRepoPicker(true)}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border-color bg-ui-panels text-text-secondary hover:text-text-primary hover:border-accent-primary/50 text-xs font-bold transition-all"
+                  >
+                    <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z" />
+                    </svg>
+                    Import from GitHub
+                  </button>
+                </>
+              )}
+
+              {/* Logged in but GitHub not yet linked (e.g. Google user) */}
+              {token && !githubConnected && (
+                <button
+                  onClick={() => window.location.href = `http://localhost:8000/auth/github/login?link_token=${token}`}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-accent-primary/40 bg-accent-primary/10 text-accent-primary hover:bg-accent-primary/20 text-xs font-bold transition-all"
+                >
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z" />
+                  </svg>
+                  Connect to GitHub
+                </button>
+              )}
             </div>
-          )}
+          </div>
 
           {/* Editor */}
           <div className="flex-grow border border-border-color rounded-xl overflow-hidden shadow-sm min-h-[400px] lg:min-h-0">
-            <CodeEditor value={code} onChange={onCodeChange} language={language} />
+            <CodeEditor value={code} onChange={onCodeChange} language={language} onSolidAnalyze={onSolidAnalyze} />
           </div>
 
           {/* Model selector + Optimize button row */}
@@ -291,12 +353,25 @@ const Dashboard: React.FC<DashboardProps> = ({
               <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
                 SOLID Principles
               </span>
-              <span className={`text-xs font-bold px-2 py-0.5 rounded-full border
-                ${total_violations === 0
-                  ? 'bg-green-500/10 border-green-500/30 text-green-400'
-                  : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
-                {total_violations === 0 ? 'All Pass' : `${total_violations} Violations`}
-              </span>
+              <div className="flex items-center gap-2">
+                {/* SOLID is the Architect's opinion (an LLM call) — only runs on demand. */}
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => { e.stopPropagation(); onSolidAnalyze?.(); }}
+                  className="text-xs font-bold px-2 py-0.5 rounded-full border border-accent-primary/40
+                             text-accent-primary hover:bg-accent-primary/10 transition-colors cursor-pointer"
+                  title="Run the Architect's SOLID review"
+                >
+                  {solidLoading ? 'Analyzing…' : '⚡ Analyze (Alt+Enter)'}
+                </span>
+                <span className={`text-xs font-bold px-2 py-0.5 rounded-full border
+                  ${total_violations === 0
+                    ? 'bg-green-500/10 border-green-500/30 text-green-400'
+                    : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                  {total_violations === 0 ? 'All Pass' : `${total_violations} Violations`}
+                </span>
+              </div>
             </div>
 
             <div className="flex flex-wrap gap-2">

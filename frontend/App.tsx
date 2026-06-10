@@ -17,15 +17,19 @@ import RepoAnalysis from './components/RepoAnalysis';
 import Trends from './components/Trends';
 
 const App: React.FC = () => {
-  const [currentPage, setCurrentPage]     = useState<Page>(Page.DASHBOARD);
+  const [currentPage, setCurrentPage]     = useState<Page>(
+    () => (localStorage.getItem('owlint_token') ? Page.DASHBOARD : Page.LOGIN)
+  );
   const [code, setCode]                   = useState<string>('class User:\n    def save(self):\n        pass');
   const [language, setLanguage]           = useState<'python' | 'java'>('python');
-  const [selectedModel, setSelectedModel] = useState<string>('llama-3.1-8b');
+  const [selectedModel, setSelectedModel] = useState<string>('openai/gpt-oss-120b');
   const [historyOpen, setHistoryOpen]     = useState(false);
   const [isOptimizing, setIsOptimizing]   = useState(false);
+  const [solidLoading, setSolidLoading]   = useState(false);
   const [token, setToken]                 = useState<string | null>(
     () => localStorage.getItem('owlint_token')
   );
+  const [githubConnected, setGithubConnected] = useState<boolean>(false);
 
   const [analysisResult, setAnalysisResult] = useState<any>({
     time_complexity:   'O(1)',
@@ -49,6 +53,7 @@ const App: React.FC = () => {
   });
 
   const socketRef        = useRef<WebSocket | null>(null);
+  const wsTokenRef       = useRef<string | null>(null);
   const codeRef          = useRef(code);
   const selectedModelRef = useRef(selectedModel);
 
@@ -67,18 +72,41 @@ const App: React.FC = () => {
     }
   }, []);
 
+  // ── Know whether the logged-in user has GitHub linked ─────
+  // Google users start without GitHub and unlock repo features by pressing
+  // "Connect to GitHub". GitHub users are connected from the start.
+  useEffect(() => {
+    if (!token) { setGithubConnected(false); return; }
+    fetch('http://localhost:8000/auth/me', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(u => setGithubConnected(!!u?.github_connected))
+      .catch(() => setGithubConnected(false));
+  }, [token]);
+
   // ── Persistent WebSocket ──────────────────────────────────
   const connectWebSocket = useCallback((tok: string | null) => {
-  // 1. Don't reconnect if already open
-  if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+  // 1. Keep the current socket ONLY if it's open AND already authenticated with
+  //    the same token. Otherwise we must reconnect so the server learns the
+  //    user's identity (required to save history). This matters right after
+  //    sign-in, when an anonymous socket opened before the token arrived.
+  if (
+    socketRef.current &&
+    socketRef.current.readyState === WebSocket.OPEN &&
+    wsTokenRef.current === tok
+  ) {
     return;
   }
 
-  // 2. Clear listeners and close if it exists in any other non-CLOSED state
+  // 2. Clear listeners and close any existing socket (wrong token / stale state)
   if (socketRef.current && socketRef.current.readyState !== WebSocket.CLOSED) {
     socketRef.current.onclose = null;
     socketRef.current.close();
   }
+
+  // Remember which token THIS socket is being opened with.
+  wsTokenRef.current = tok;
 
     const wsUrl = tok
       ? `ws://localhost:8000/ws/analyze?token=${tok}`
@@ -92,13 +120,20 @@ const App: React.FC = () => {
       try {
         const data = JSON.parse(event.data);
         if (!data || data.error) return;
-        setAnalysisResult(data);
+        // MERGE, never replace: typing updates complexity/clean, the Alt+Enter
+        // SOLID response updates only SOLID, and neither clobbers the other.
+        setAnalysisResult((prev: any) => ({ ...prev, ...data }));
         if (data.refactored_code || data.agent_report || data.validator_verdict) {
           setIsOptimizing(false);
+        }
+        // SOLID-on-demand response arrived (architect opinion or error).
+        if (data.solid_source === 'architect' || data.solid_error) {
+          setSolidLoading(false);
         }
       } catch (e) {
         console.error('WebSocket parse error:', e);
         setIsOptimizing(false);
+        setSolidLoading(false);
       }
     };
 
@@ -130,6 +165,16 @@ const App: React.FC = () => {
     setCode(newCode);
     debouncedSend(newCode);
   };
+
+  // ── SOLID on demand (Alt+Enter in the editor) ─────────────
+  // SOLID is an LLM call (the Architect's opinion), so it only runs when the
+  // user explicitly asks for it — not on every keystroke like the static cards.
+  const requestSolidAnalysis = useCallback(() => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    setSolidLoading(true);
+    ws.send(JSON.stringify({ code: codeRef.current, trigger: 'solid' }));
+  }, []);
 
   const navigateTo = useCallback((page: Page) => setCurrentPage(page), []);
 
@@ -185,11 +230,14 @@ const App: React.FC = () => {
             onNavigate={navigateTo}
             code={code}
             token={token}
+            githubConnected={githubConnected}
             onCodeChange={handleCodeChange}
             analysisResult={analysisResult}
             language={language}
             setLanguage={setLanguage}
             onAnalyze={handleAnalyze}
+            onSolidAnalyze={requestSolidAnalysis}
+            solidLoading={solidLoading}
             selectedModel={selectedModel}
             setSelectedModel={setSelectedModel}
           />
@@ -253,11 +301,14 @@ const App: React.FC = () => {
             onNavigate={navigateTo}
             code={code}
             token={token}
+            githubConnected={githubConnected}
             onCodeChange={handleCodeChange}
             analysisResult={analysisResult}
             language={language}
             setLanguage={setLanguage}
             onAnalyze={handleAnalyze}
+            onSolidAnalyze={requestSolidAnalysis}
+            solidLoading={solidLoading}
             selectedModel={selectedModel}
             setSelectedModel={setSelectedModel}
           />

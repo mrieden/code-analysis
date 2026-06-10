@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Page } from '../types';
 import { calculateGlobalScore } from './Results';
 import ScoreCircle from './ScoreCircle';
@@ -13,7 +13,14 @@ interface OptimizeReportProps {
 const OptimizeReport: React.FC<OptimizeReportProps> = ({
   onNavigate, results, code, isLoading = false,
 }) => {
-  const refactored       = results?.refactored_code   || '';
+  const architectVerdict = results?.architect_verdict || '';
+  // Whether a refactor actually happened is decided by the CODE itself, not the
+  // verdict. A final HALT_PERFECT_ENOUGH can mean "we refactored and the result
+  // is now clean" — in that case the code DID change and we must show it. We
+  // only mirror the original when the backend returned no distinct refactor
+  // (true "already optimal" or a ratchet-discarded refactor).
+  const refactored       = results?.refactored_code || code;
+  const halted           = refactored.trim() === code.trim();
   const suggestions      = results?.suggestions       || [];
   const verdict          = results?.validator_verdict || '';
   const comparatorReport = results?.comparator_report || '';
@@ -22,20 +29,40 @@ const OptimizeReport: React.FC<OptimizeReportProps> = ({
   const [copiedOriginal,   setCopiedOriginal]   = useState(false);
   const [copiedRefactored, setCopiedRefactored] = useState(false);
 
+  // ── Loading progression (mirrors the LangGraph agent workflow in graph) ──
+  // The analyze socket returns one final payload (no per-agent streaming), so
+  // we walk each step's dot → checkmark on a timer and finish the moment the
+  // real result lands (isLoading flips false and the report replaces this).
+  const AGENT_FLOW = [
+    'Detect Language',
+    'Characterize',
+    'Analyzer',
+    'Architect',
+    'Refactor Agent',
+    'Syntax Check',
+    'Convergence',
+    'Executer',
+    'Regression Check',
+  ];
+  const [agentStep, setAgentStep] = useState(0);
+  useEffect(() => {
+    if (!isLoading) { setAgentStep(0); return; }
+    setAgentStep(0);
+    const id = setInterval(() => {
+      setAgentStep(prev => (prev < AGENT_FLOW.length - 1 ? prev + 1 : prev));
+    }, 2500);
+    return () => clearInterval(id);
+  }, [isLoading]);
+
   // ── Scores ────────────────────────────────────────────────
   const scoreBefore = calculateGlobalScore(results);
 
-  // Build a "fake" after-result using the refactored code analysis
-  // The comparator report tells us what improved — we approximate the after score
-  // by checking how many SOLID violations were resolved
-  const getScoreAfter = (): number => {
-    if (!verdict || verdict !== 'PASS') return scoreBefore;
-    // If comparator passed, assume all SOLID violations fixed → max solid score
-    const solidBonus = (results?.total_violations ?? 0) * 7;
-    return Math.min(100, scoreBefore + solidBonus);
-  };
-
-  const scoreAfter   = getScoreAfter();
+  // Real "after" score: the backend re-runs the static analyzer on the
+  // refactored code and returns it as `refactored_analysis`. When it's absent
+  // (no refactor happened, or the refactored source couldn't be scored) we fall
+  // back to the before-score so we never fabricate an improvement.
+  const afterResults = results?.refactored_analysis || null;
+  const scoreAfter   = afterResults ? calculateGlobalScore(afterResults) : scoreBefore;
   const scoreDelta   = scoreAfter - scoreBefore;
   const changedLines = code.split('\n').length !== refactored.split('\n').length
     ? Math.abs(code.split('\n').length - refactored.split('\n').length)
@@ -102,14 +129,9 @@ ${refactored}
   // ── Loading ───────────────────────────────────────────────
   if (isLoading) {
     const darkMode = document.documentElement.classList.contains('dark');
-    const analysisComplete  = !!(results?.agent_report);
-    const refactorComplete  = !!(results?.refactored_code);
-    const validationComplete = !!(results?.validator_verdict);
-    const agents = [
-      { label: 'Analysis Agent',   done: analysisComplete },
-      { label: 'Refactor Agent',   done: refactorComplete },
-      { label: 'Validation Agent', done: validationComplete },
-    ];
+    // Each step turns into a checkmark once the timer advances past it.
+    const agents = AGENT_FLOW.map((label, i) => ({ label, done: i < agentStep }));
+    const activeIndex = agentStep;
     return (
       <div className="flex flex-col items-center justify-center flex-grow py-10 gap-6">
         {/* Spinner with logo */}
@@ -133,14 +155,20 @@ ${refactored}
         </div>
         <div className="flex flex-col gap-2 w-64">
           {agents.map((agent, i) => (
-            <div key={i} className="flex items-center gap-3 px-4 py-2 rounded-lg
-                                    bg-ui-panels border border-border-color">
+            <div key={i} className={`flex items-center gap-3 px-4 py-2 rounded-lg border transition-all
+                          ${agent.done
+                            ? 'bg-green-500/5 border-green-500/30'
+                            : i === activeIndex
+                              ? 'bg-accent-primary/5 border-accent-primary/40'
+                              : 'bg-ui-panels border-border-color'}`}>
               {agent.done ? (
                 <span className="text-green-400 text-sm font-bold">✓</span>
-              ) : (
+              ) : i === activeIndex ? (
                 <div className="w-2 h-2 rounded-full bg-accent-primary animate-pulse" />
+              ) : (
+                <div className="w-2 h-2 rounded-full bg-text-secondary/30" />
               )}
-              <p className={`text-xs font-bold ${agent.done ? 'text-green-400' : 'text-text-primary'}`}>
+              <p className={`text-xs font-bold ${agent.done ? 'text-green-400' : i === activeIndex ? 'text-text-primary' : 'text-text-secondary'}`}>
                 {agent.label}
               </p>
             </div>
@@ -232,6 +260,17 @@ ${refactored}
           )}
         </div>
       </div>
+
+      {/* ── ALREADY CLEAN: zero violations, nothing to refactor ─────────── */}
+      {halted && (results?.total_violations || 0) === 0 && (
+        <div className="bg-green-500/10 border border-green-500/30 rounded-xl px-4 py-3 flex items-center gap-3">
+          <span className="text-green-400 text-lg font-bold">✓</span>
+          <p className="text-sm text-text-primary">
+            The Architect found <span className="font-bold text-green-400">no SOLID violations</span> (HALT_PERFECT_ENOUGH),
+            so the code is already clean — no refactor was needed.
+          </p>
+        </div>
+      )}
 
       {/* ── BEFORE / AFTER SCORE COMPARISON ─────────────────── */}
       <div className="bg-ui-panels border border-border-color rounded-xl p-6">
