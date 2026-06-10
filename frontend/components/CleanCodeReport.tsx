@@ -80,7 +80,23 @@ const CleanCodeReport: React.FC<CleanCodeReportProps> = ({ onNavigate, results, 
           <p className="text-text-secondary">Lines: <strong>{metrics.loc ?? 0}</strong></p>
           <p className="text-text-secondary">Logical Lines: <strong>{metrics.lloc ?? 0}</strong></p>
           <p className="text-text-secondary">Max CC: <strong>{metrics.cc_max ?? 0}</strong></p>
+          <p className="text-text-secondary">Pylint: <strong>{metrics.pylint_score ?? 'N/A'}/10</strong></p>
         </div>
+      </div>
+
+      {/* Key metrics — Maintainability Index, Cyclomatic Complexity, Pylint */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {[
+          { label: 'Maintainability Index', value: metrics.maintainability_index ?? 'N/A', suffix: (metrics.maintainability_index !== undefined && metrics.maintainability_index !== null) ? '/100' : '', hint: 'Higher is better (radon mi_visit)' },
+          { label: 'Cyclomatic Complexity', value: metrics.cc_max ?? 'N/A', suffix: '', hint: 'Worst function (radon cc_visit)' },
+          { label: 'Pylint Score', value: metrics.pylint_score ?? 'N/A', suffix: (metrics.pylint_score !== undefined && metrics.pylint_score !== null) ? '/10' : '', hint: 'Static lint rating' },
+        ].map((m: any) => (
+          <div key={m.label} className="bg-ui-panels p-5 rounded-xl border border-border-color shadow-md">
+            <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary">{m.label}</p>
+            <p className="text-3xl font-bold text-text-primary mt-1">{m.value}<span className="text-base text-text-secondary">{m.suffix}</span></p>
+            <p className="text-xs text-text-secondary mt-1">{m.hint}</p>
+          </div>
+        ))}
       </div>
 
       {/* Code snippet */}

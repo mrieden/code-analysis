@@ -7,6 +7,7 @@ interface CodeEditorProps {
   initialCode?: string;
   highlightedLines?: number[];
   readOnly?: boolean;
+  onSolidAnalyze?: () => void;
 }
 
 const CodeEditor: React.FC<CodeEditorProps> = ({ 
@@ -14,7 +15,8 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
   onChange, 
   initialCode = '', 
   highlightedLines = [], 
-  readOnly = false 
+  readOnly = false, 
+  onSolidAnalyze 
 }) => {
   const [internalCode, setInternalCode] = useState(initialCode);
 
@@ -31,6 +33,14 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (readOnly) return;
+
+    // Alt+Enter -> run the SOLID analysis (Architect opinion). It's an LLM call,
+    // so it only fires on this explicit shortcut, never on every keystroke.
+    if (e.altKey && e.key === 'Enter') {
+      e.preventDefault();
+      onSolidAnalyze?.();
+      return;
+    }
 
     if (e.key === 'Tab') {
       e.preventDefault(); // stop browser tab-switch

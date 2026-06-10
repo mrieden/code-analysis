@@ -20,10 +20,10 @@ class Settings(BaseSettings):
     # ── Models used by the multi-language agent pipeline ──────────
     # Defaulted so the app still boots if your .env doesn't define one
     # (e.g. model3); any value set in your .env overrides the default.
-    model1: str = "openrouter/owl-alpha"
-    model2: str = "meta-llama/llama-4-scout-17b-16e-instruct"
-    model3: str = "llama-3.3-70b-versatile"
-    model4: str = "meta-llama/llama-3.3-70b-instruct:free"
+    model1: str = "openai/gpt-oss-120b"          # Translator + Refactor
+    model2: str = "llama-3.3-70b-versatile"       # Characterizer
+    model3: str = "openai/gpt-oss-20b"            # Report summarizer
+    model4: str = "openai/gpt-oss-120b:free"      # Architect
     max_iterations: int = 3
     max_improvement_loops: int = 3
     min_gain: float = 0.05
