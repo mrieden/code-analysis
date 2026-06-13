@@ -47,9 +47,6 @@ def _decorator_names(func: ast.FunctionDef) -> set[str]:
     return names
 
 
-def _is_classmethod(func: ast.FunctionDef) -> bool:
-    return bool(_decorator_names(func) & {"classmethod"})
-
 
 def _is_staticmethod(func: ast.FunctionDef) -> bool:
     return bool(_decorator_names(func) & {"staticmethod"})
@@ -101,9 +98,6 @@ def is_abstract_method(node: ast.FunctionDef) -> bool:
         if isinstance(n, ast.Raise) and exc_name_from_raise(n) == "NotImplementedError":
             return True
 
-    # FIX: tighten docstring heuristic — require explicit "not implemented" /
-    # "subclasses should implement" phrasing only (removed vague "abstract",
-    # "override" which caused far too many false positives).
     doc = ast.get_docstring(node)
     if doc and any(t in doc.lower() for t in _ABSTRACT_DOC_TRIGGERS):
         return True
@@ -140,10 +134,7 @@ class Signature:
     kwarg: Optional[str]
     annotations: dict[str, str]
     return_annotation: Optional[str]
-    # NEW: track default values as unparsed strings so we can detect
-    # changes in default *values* (not just count).
     default_values: list[str] = field(default_factory=list)
-    # NEW: track all param annotations including kwonly
     kwonly_annotations: dict[str, str] = field(default_factory=dict)
 
 
@@ -250,10 +241,7 @@ class TypeChecker:
         return result
 
 
-# ---------------------------------------------------------------------------
-# NEW: Helper to collect all raises in a function (non-recursive into nested
-#      function/class defs, matching how callers see the method surface).
-# ---------------------------------------------------------------------------
+
 
 def _direct_raises(func: ast.FunctionDef) -> set[str]:
     """
@@ -268,24 +256,14 @@ def _direct_raises(func: ast.FunctionDef) -> set[str]:
 def _walk_no_nested(node: ast.AST, out: set[str]) -> None:
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue  # don't descend into nested scopes
+            continue  
         if isinstance(child, ast.Raise):
             out.add(exc_name_from_raise(child))
         _walk_no_nested(child, out)
 
 
-# ---------------------------------------------------------------------------
-# NEW: Detect early-return guards anywhere in the method body
-#      (not just the first statement like the original code).
-# ---------------------------------------------------------------------------
 
 def _has_early_return_guard(func: ast.FunctionDef, param_names: list[str]) -> bool:
-    """
-    Return True if there is ANY if-block in the function body (at the top
-    level of the function, not inside loops/try blocks) whose test is a
-    type/identity guard on a parameter AND whose body only returns or raises.
-    This catches stricter-precondition guards beyond just the first line.
-    """
     for stmt in func.body:
         if (
             isinstance(stmt, ast.If)
@@ -296,11 +274,7 @@ def _has_early_return_guard(func: ast.FunctionDef, param_names: list[str]) -> bo
     return False
 
 
-# ---------------------------------------------------------------------------
-# NEW: Detect whether a method calls super() for the same method name.
-#      A concrete override that never calls super() may silently break the
-#      parent contract (Liskov substitutability via behavioral composition).
-# ---------------------------------------------------------------------------
+
 
 def _calls_super(func: ast.FunctionDef) -> bool:
     for node in ast.walk(func):
@@ -325,12 +299,6 @@ def _calls_super(func: ast.FunctionDef) -> bool:
                 return True
     return False
 
-
-# ---------------------------------------------------------------------------
-# NEW: Parameter renaming detection.
-#      Callers using positional args are fine, but callers using keyword args
-#      will break if a positional parameter is renamed.
-# ---------------------------------------------------------------------------
 
 def _renamed_params(child_sig: "Signature", parent_sig: "Signature") -> list[tuple[str, str]]:
     """Return list of (parent_name, child_name) pairs that differ by position."""

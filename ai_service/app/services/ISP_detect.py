@@ -258,7 +258,7 @@ class ISPDetector(ast.NodeVisitor):
             self.detect_fat_interface(node, methods)
             self.detect_interface_role_mixing(node)
             self.detect_parameter_bloat(node)
-            self.detect_interface_inheritance_depth(node)   # Rule 10
+            self.detect_interface_inheritance_depth(node)   
             self.current_interface = None
             return
 
@@ -277,13 +277,12 @@ class ISPDetector(ast.NodeVisitor):
 
         self.detect_unused_interface_methods(node)
         self.detect_forced_methods(node)
-        self.detect_client_role_segregation(node)
         self.detect_standalone_role_mixing(node)
         self.detect_type_dispatch(node)
-        self.detect_god_class(node)                         # Rule 13
-        self.detect_optional_method_pattern(node)          # Rule 11
-        self.detect_boolean_flag_dispatch(node)            # Rule 12
-        self.detect_coarse_parameter_dependency(node)      # Rule 14
+        self.detect_god_class(node)                         # Rule 12
+        self.detect_optional_method_pattern(node)          # Rule 10
+        self.detect_boolean_flag_dispatch(node)            # Rule 11
+        self.detect_coarse_parameter_dependency(node)      # Rule 13
 
         self.current_class = None
 
@@ -552,43 +551,8 @@ class ISPDetector(ast.NodeVisitor):
                 ),
             })
 
-    # ── Rule 6: Client Role Segregation ──────────────────────────
-    def detect_client_role_segregation(self, node):
-        existing_unused_targets = {
-            v["class"] for v in self.violations
-            if v.get("type") == "Unused Interface Methods"
-            and v.get("class") == node.name
-        }
 
-        for base in self._all_interface_bases(node.name):
-            if node.name in existing_unused_targets:
-                continue
-            interface_methods = self._resolve_interface_methods(base)
-            if len(interface_methods) < 4:
-                continue
-
-            defined = set(self.class_methods.get(node.name, []))
-            used   = (self.class_attr_usage.get(node.name, set()) | defined) & interface_methods
-            unused = interface_methods - used
-
-            if len(used) > 0 and len(unused) > len(used):
-                self.violations.append({
-                    "class":    node.name,
-                    "lineno":   node.lineno,
-                    "severity": "MEDIUM",
-                    "type":     "Client Role Segregation",
-                    "reason": (
-                        f"'{node.name}' uses only {len(used)}/{len(interface_methods)} "
-                        f"methods of '{base}' ({', '.join(sorted(used))}), "
-                        f"suggesting the interface serves multiple unrelated client roles."
-                    ),
-                    "suggestion": (
-                        f"Split '{base}' into role-specific interfaces so each "
-                        f"client depends only on the methods it actually needs."
-                    ),
-                })
-
-    # ── Rule 7: Cross-Class Disjoint Usage ───────────────────────
+    # ── Rule 6: Cross-Class Disjoint Usage ───────────────────────
     def detect_cross_class_disjoint_usage(self):
         iface_to_classes = {}
         for cls_name, bases in self.class_implements.items():
@@ -644,7 +608,7 @@ class ISPDetector(ast.NodeVisitor):
                             ),
                         })
 
-    # ── Rule 8: Standalone Class Role Mixing ─────────────────────
+    # ── Rule 7: Standalone Class Role Mixing ─────────────────────
     def detect_standalone_role_mixing(self, node):
         if self._all_interface_bases(node.name):
             return
@@ -717,7 +681,7 @@ class ISPDetector(ast.NodeVisitor):
             ),
         })
 
-    # ── Rule 9: Type-Dispatch Multiplexing ───────────────────────
+    # ── Rule 8: Type-Dispatch Multiplexing ───────────────────────
     TYPE_PARAM_NAMES = {"type", "kind", "mode", "variant", "strategy"}
 
     def detect_type_dispatch(self, node):
@@ -843,7 +807,7 @@ class ISPDetector(ast.NodeVisitor):
             return result
         return []
 
-    # ── Rule 10: Interface Inheritance Depth ──────────────────────
+    # ── Rule 9: Interface Inheritance Depth ──────────────────────
     # NEW: An interface that inherits from 3+ other interfaces becomes a
     # de-facto fat interface. Every implementor is forced to implement the
     # entire ancestor chain, even if they only need a leaf subset.
@@ -891,7 +855,7 @@ class ISPDetector(ast.NodeVisitor):
             ),
         })
 
-    # ── Rule 11: Optional Method Pattern ─────────────────────────
+    # ── Rule 10: Optional Method Pattern ─────────────────────────
     # NEW: Catches methods in concrete classes that always return a constant
     # (None, True, False, 0, "") — not a raise-stub, but a semantically empty
     # implementation that signals the class doesn't need the method.
@@ -954,11 +918,11 @@ class ISPDetector(ast.NodeVisitor):
                 ),
             })
 
-    # ── Rule 12: Boolean Flag Dispatch ───────────────────────────
+    # ── Rule 11: Boolean Flag Dispatch ───────────────────────────
     # NEW: Catches classes that store boolean flags in __init__ and branch
     # on them in multiple methods — a disguised multi-variant class that
     # forces all clients to carry logic they don't need.
-    # Complements Rule 9 (which only catches named type/kind/mode selectors).
+    # Complements Rule 8 (which only catches named type/kind/mode selectors).
     BOOL_PARAM_NAMES = {"is_async", "async_mode", "use_cache", "cached",
                         "compressed", "encrypted", "buffered", "lazy",
                         "strict", "verbose", "debug", "dry_run", "enabled"}
@@ -1056,7 +1020,7 @@ class ISPDetector(ast.NodeVisitor):
                 hits.add(test.attr)
         return hits
 
-    # ── Rule 13: God Class ────────────────────────────────────────
+    # ── Rule 12: God Class ────────────────────────────────────────
     # NEW: A standalone class (no interface) with too many public methods
     # forces every client to take the entire surface area, even if they
     # need only one or two methods. This is the class-level ISP smell.
@@ -1099,7 +1063,7 @@ class ISPDetector(ast.NodeVisitor):
             ),
         })
 
-    # ── Rule 14: Coarse-Grained Parameter Dependency ─────────────
+    # ── Rule 13: Coarse-Grained Parameter Dependency ─────────────
     # NEW: A function that accepts an interface as a parameter but only calls
     # 1-2 methods on it is a client with too broad a dependency.
     # The interface could be split so the function only depends on the

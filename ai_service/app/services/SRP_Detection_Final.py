@@ -43,11 +43,9 @@ NOUN_DOMAINS: dict[str, set[str]] = {
 COLLABORATOR_NOUN_DOMAINS: dict[str, set[str]] = {
     "persistence":  {"db", "repo", "repository", "store", "database",
                      "session", "conn", "connection", "cursor", "orm",
-                     # FIX A: file/stream collaborators added
                      "file", "writer", "reader", "buffer", "output", "input"},
     "network":      {"client", "http", "api", "request", "socket",
                      "endpoint", "proxy", "gateway",
-                     # FIX A: socket aliases added
                      "sock", "stream", "pipe", "channel", "some_socket"},
     "auth":         {"auth", "jwt", "token", "sso", "oauth", "permissions"},
     "notification": {"mailer", "smtp", "email", "sms", "notifier",
@@ -60,7 +58,7 @@ COLLABORATOR_NOUN_DOMAINS: dict[str, set[str]] = {
     "parsing":      {"parser", "decoder", "transformer", "mapper"},
 }
 
-# FIX B: Attributes that create false cohesion — excluded from LCOM calculation
+
 LCOM_NOISE_ATTRS = {
     "logger", "log", "config", "cfg", "settings", "debug",
     "verbose", "name", "type", "mode", "flag", "enabled",

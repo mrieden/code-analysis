@@ -482,9 +482,6 @@ class OCPDetector(ast.NodeVisitor):
 
     def visit_If(self, node):
         matched = (
-            # FIX: run the more specific Enum/State check *before* the generic
-            # name check, otherwise the high-severity name check always wins
-            # and Enum Dispatch is unreachable.
             self._check_enum_dispatch(node)
             or self._check_name_type_dispatch(node)
             or self._check_isinstance_dispatch(node)
@@ -496,8 +493,6 @@ class OCPDetector(ast.NodeVisitor):
             or self._check_string_startswith_type(node)
             or self._check_property_inspection(node)
         )
-        # FIX: only evaluate the elif-chain length once, at the head of the
-        # chain. Nested elif Ifs are marked and skipped to avoid duplicates.
         if not matched and id(node) not in self._counted_elif:
             depth = self._check_elif_chain(node)
             if depth >= 2:
@@ -564,8 +559,6 @@ class OCPDetector(ast.NodeVisitor):
         prev_class = self.current_class
         self.current_class = node.name
         self._type_var_scopes.append(set())
-        # FIX: use the signature-aware routing check + a separate find_by check,
-        # instead of the broad name-prefix logic that flagged process_*/handle_*.
         self._check_method_routing(node)
         self._check_find_by_routing(node)
         self.generic_visit(node)
@@ -573,40 +566,10 @@ class OCPDetector(ast.NodeVisitor):
         self.current_class = prev_class
 
     def visit_Module(self, node):
-        # FIX: removed the pre-walk that tracked assignments from *inside*
-        # functions into module scope (scope pollution + double processing).
-        # Ordinary traversal tracks each assignment in its own scope.
+
         self.generic_visit(node)
 
 
-def _suggestion_for(v_type: str) -> str:
-    suggestions = {
-        "IF Name Dispatch": "Replace if/elif chains with polymorphism or a strategy object.",
-        "IF Name Dispatch (BoolOp)": "Boolean chains of type comparisons are a dispatch table in disguise \u2014 use a dict or polymorphism.",
-        "IF Tracked-Type Var Dispatch": "Variable carries type/kind info; replace branching with polymorphism or a dispatch dict.",
-        "Enum Dispatch": "Branching on an enum/class constant \u2014 consider the State or Strategy pattern.",
-        "isinstance Dispatch": "Use polymorphism or functools.singledispatch instead of isinstance().",
-        "issubclass Dispatch": "issubclass() dispatch belongs in a registry; use ABCs or singledispatch.",
-        "type() Dispatch": "Avoid comparing type() directly; prefer polymorphism.",
-        "type() / __class__ Dispatch": "Avoid __class__ comparisons; rely on polymorphism or ABCs.",
-        "__class__.__name__ Dispatch": "String-based class-name checks are fragile; use isinstance() or polymorphism.",
-        "hasattr Dispatch": "Define a shared interface/Protocol so callers don't inspect capabilities.",
-        "callable() Dispatch": "Use a Protocol with __call__ rather than checking callability at runtime.",
-        "getattr Dispatch": "Centralise type metadata in a base class rather than probing attributes.",
-        "startswith/endswith Type Dispatch": "Partial-string type matching is brittle; use an enum or subclass hierarchy.",
-        "Long elif Chain": "Long elif chains are hard to extend; replace with a dispatch table or polymorphic calls.",
-        "MATCH-CASE Dispatch": "Match-case over types/roles violates OCP; prefer visitor pattern or singledispatch.",
-        "MATCH-CASE Class Pattern Dispatch": "Class pattern match-case is explicit type dispatch; use the Visitor pattern or singledispatch.",
-        "Type Dispatch Dict": "A class-keyed dict is a manual vtable; consider singledispatch or subclass registration.",
-        "Dict Subscript type() Dispatch": "Indexing a dict by type(obj) is a dispatch table \u2014 use singledispatch or polymorphism.",
-        "Dict Subscript Attr Dispatch": "Routing through a dict keyed on .type/.kind \u2014 consider polymorphism or a registry.",
-        "Property Inspection (Tell, Don't Ask)": "Push the decision logic into the object as a method.",
-        "Hardcoded Filtering (Missing Specification)": "Use the Specification pattern so new criteria don't require edits.",
-        "Hardcoded Registry": "Use dependency injection or a registration method instead of a hardcoded map.",
-        "Method Name Routing": "Use the Strategy pattern or polymorphism instead of type-specific methods.",
-        "Method Name Routing (find_by)": "Use the Specification pattern instead of proliferating find_by_* methods.",
-    }
-    return suggestions.get(v_type, "Use polymorphism or a strategy pattern instead of type-based branching.")
 
 
 def detect_ocp_violations_from_file(filename: str) -> list:
@@ -641,6 +604,5 @@ def get_ocp_report(code_str: str) -> dict:
     return {
         "status": "Violation",
         "reason": f"{location} [{top['type']}]: {top['detail']}",
-        "suggestion": _suggestion_for(top["type"]),
         "violations": detector.violations,
     }
